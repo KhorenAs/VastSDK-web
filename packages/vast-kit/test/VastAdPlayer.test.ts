@@ -250,6 +250,112 @@ describe('VastAdPlayer', () => {
     expect(host.contains(adPlayer.layer)).toBe(false)
     expect(heard).toHaveLength(before)
   })
+
+  /**
+   * No viewer can reach a seek or a speed control — the element has neither —
+   * but devtools, an extension or a "skip ads" script can set them directly.
+   * The engine would refuse to credit the jump; the element refuses the jump.
+   */
+  describe('a way around the ad', () => {
+    it('puts a forward seek it did not ask for back where playback had reached', async () => {
+      const { adPlayer, media, listener } = player()
+      await adPlayer.load(A, listener, { volume: 1, muted: false })
+      media.timeUpdate(3)
+
+      media.externalSeek(9)
+
+      expect(adPlayer.video.currentTime, 'the viewer is not past the ad').toBe(3)
+      await settle()
+      expect(media.seeking).toBe(false)
+    })
+
+    it('puts a backward seek back too: nothing the viewer can reach seeks an ad either way', async () => {
+      const { adPlayer, media, listener } = player()
+      await adPlayer.load(A, listener, { volume: 1, muted: false })
+      media.timeUpdate(6)
+
+      media.externalSeek(1)
+
+      expect(adPlayer.video.currentTime).toBe(6)
+    })
+
+    it('lets a nudge within half a second stand, as engines make on their own', async () => {
+      const { adPlayer, media, listener } = player()
+      await adPlayer.load(A, listener, { volume: 1, muted: false })
+      media.timeUpdate(3)
+
+      media.externalSeek(3.3)
+
+      expect(adPlayer.video.currentTime).toBe(3.3)
+    })
+
+    it('does not let a run of small seeks walk the ad forward', async () => {
+      const { adPlayer, media, listener } = player()
+      await adPlayer.load(A, listener, { volume: 1, muted: false })
+      media.timeUpdate(3)
+
+      media.externalSeek(3.4)
+      await settle()
+      media.externalSeek(3.8)
+
+      expect(adPlayer.video.currentTime, 'measured from where playback reached, not from the last seek').toBe(3)
+    })
+
+    it('takes its reference from playback, which keeps moving after a refused seek', async () => {
+      const { adPlayer, media, listener } = player()
+      await adPlayer.load(A, listener, { volume: 1, muted: false })
+      media.timeUpdate(3)
+      media.externalSeek(9)
+      await settle()
+
+      media.timeUpdate(4)
+      media.externalSeek(8)
+
+      expect(adPlayer.video.currentTime).toBe(4)
+    })
+
+    it('starts every creative from its own beginning', async () => {
+      const { adPlayer, media, listener } = player()
+      await adPlayer.load(A, listener, { volume: 1, muted: false })
+      media.timeUpdate(7)
+      await adPlayer.load(B, listener, { volume: 1, muted: false })
+
+      media.externalSeek(5)
+
+      expect(adPlayer.video.currentTime, "the last creative's position is not this one's").toBe(0)
+    })
+
+    it('leaves the element alone with no creative in it', () => {
+      const { adPlayer, media } = player()
+
+      media.externalSeek(5)
+      media.externalRate(2)
+
+      expect(adPlayer.video.currentTime).toBe(5)
+      expect(adPlayer.video.playbackRate).toBe(2)
+    })
+
+    it('puts a speed it did not ask for back to 1×', async () => {
+      const { adPlayer, media, listener } = player()
+      await adPlayer.load(A, listener, { volume: 1, muted: false })
+
+      media.externalRate(2)
+
+      expect(adPlayer.video.playbackRate).toBe(1)
+      expect(adPlayer.video.defaultPlaybackRate).toBe(1)
+    })
+
+    it('starts every creative at 1×, whatever the element was left at', async () => {
+      const { adPlayer, listener } = player()
+      adPlayer.video.playbackRate = 1.5
+      adPlayer.video.defaultPlaybackRate = 1.5
+
+      await adPlayer.load(A, listener, { volume: 1, muted: false })
+
+      expect(adPlayer.video.playbackRate).toBe(1)
+      expect(adPlayer.video.defaultPlaybackRate).toBe(1)
+    })
+  })
 })
 
 // MARK: - The clock

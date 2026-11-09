@@ -41,6 +41,14 @@ export type VastStartResult = 'started' | 'mutedByPolicy' | 'refused' | 'interru
  * every one of them is a way to scrub, background or cast an ad out from under
  * its tracking, and the session draws what the viewer is owed — skip, click,
  * unmute — itself.
+ *
+ * Nor does it take a seek or a speed it did not ask for. With no controls no
+ * viewer can reach either, but devtools, a browser extension or a "skip ads"
+ * script can set `currentTime` or `playbackRate` directly. The tracking engine
+ * already refuses to credit what such a jump passes over, so nothing would be
+ * mis-billed; the viewer would still have got past the ad. So a seek is put
+ * back where playback had reached, and a rate is put back to 1× — the web's
+ * version of Media3 refusing seeks during an ad.
  */
 export class VastAdPlayer {
   /** Absolutely positioned over the host's player; the overlay mounts here, above the video. */
@@ -51,6 +59,16 @@ export class VastAdPlayer {
   private source: string | null = null
   private startedSource: string | null = null
   private loadedSource: string | null = null
+
+  /**
+   * Where playback — not a seek — had brought the playhead, from `timeupdate`.
+   * A refused seek goes back here. Never taken from `seeked`: a run of small
+   * seeks, each inside the tolerance, must not walk the ad forward.
+   */
+  private reachedTime = 0
+
+  /** Set while the element carries out the seek that undoes one; that seek is ours. */
+  private restoring = false
   private readonly disposers: Array<() => void> = []
 
   constructor(readonly container: HTMLElement) {
@@ -129,6 +147,10 @@ export class VastAdPlayer {
     this.source = url
     this.startedSource = null
     this.loadedSource = null
+    this.reachedTime = 0
+    this.restoring = false
+    this.video.defaultPlaybackRate = 1
+    this.video.playbackRate = 1
     this.video.muted = sound.muted
     this.video.volume = clamp(sound.volume)
     this.video.src = url
@@ -196,6 +218,8 @@ export class VastAdPlayer {
     this.source = null
     this.startedSource = null
     this.loadedSource = null
+    this.reachedTime = 0
+    this.restoring = false
     this.video.pause()
     this.video.removeAttribute('src')
     try {
@@ -240,6 +264,32 @@ export class VastAdPlayer {
       if (!this.video.ended) current()?.playbackChanged(false)
     })
     on('ended', () => current()?.ended())
+
+    on('timeupdate', () => {
+      if (this.source && !this.video.seeking && !this.restoring) this.reachedTime = this.video.currentTime
+    })
+    on('seeking', () => {
+      if (!this.source || this.restoring) return
+      const target = this.video.currentTime
+      if (Math.abs(target - this.reachedTime) <= SEEK_TOLERANCE_SECONDS) return
+      this.restoring = true
+      VastLog.notice(`refused a seek to ${target.toFixed(1)} s inside the ad; back to ${this.reachedTime.toFixed(1)} s`)
+      this.video.currentTime = this.reachedTime
+    })
+    on('seeked', () => {
+      this.restoring = false
+    })
+    on('ratechange', () => {
+      if (!this.source) return
+      const video = this.video
+      if (video.playbackRate === 1 && video.defaultPlaybackRate === 1) return
+      // Watched time is measured from the playhead, so a creative played at 2×
+      // is watched in half the time and every quartile still fires.
+      VastLog.notice(`refused playback rate ${video.playbackRate} inside the ad`)
+      video.defaultPlaybackRate = 1
+      video.playbackRate = 1
+    })
+
     on('error', () => {
       const listener = current()
       if (!listener) return
@@ -283,3 +333,12 @@ function setFlag(video: HTMLVideoElement, name: 'disablePictureInPicture' | 'dis
 function clamp(volume: number): number {
   return Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 1
 }
+
+/**
+ * How far a seek nobody asked for may move the playhead before it is put back.
+ * Wide enough for the small corrections some engines make on their own — a
+ * nudge to the nearest keyframe, a seek to the start on load — and too narrow
+ * to get past anything: the reference point only moves with playback, so a
+ * run of small seeks cannot add up.
+ */
+const SEEK_TOLERANCE_SECONDS = 0.5

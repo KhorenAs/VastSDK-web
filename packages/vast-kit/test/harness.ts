@@ -381,6 +381,33 @@ export class ScriptedMedia {
     this.pause()
   }
 
+  /** Playback moves the playhead, and the element says so as a browser does: `timeupdate`. */
+  timeUpdate(time: number): void {
+    this.currentTime = time
+    this.dispatch('timeupdate')
+  }
+
+  /**
+   * Something outside the session seeks the element — devtools, an extension, a
+   * "skip ads" script: `seeking` at the new position, then `seeked` a task later.
+   * Whatever the `seeking` handlers set `currentTime` to is where it ends up.
+   */
+  externalSeek(time: number): void {
+    this.currentTime = time
+    this.seeking = true
+    this.dispatch('seeking')
+    this.queue(() => {
+      this.seeking = false
+      this.dispatch('seeked')
+    })
+  }
+
+  /** Something outside the session changes the speed, and the element announces it. */
+  externalRate(rate: number): void {
+    this.video.playbackRate = rate
+    this.dispatch('ratechange')
+  }
+
   /** A `MediaError` now, as a network or decode failure mid-stream raises one. */
   fail(code: number): void {
     this.raise(code)

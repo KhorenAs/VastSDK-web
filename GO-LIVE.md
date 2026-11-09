@@ -5,10 +5,12 @@ what blocks the road rather than by effort. Items that close are struck through
 with the commit that closed them — a list that only grows is a list nobody reads
 twice.
 
-State: `npm test` passes 349 tests — 177 in `vast-core`, every core suite of
+State: `npm test` passes 395 tests — 177 in `vast-core`, every core suite of
 VastSDK-apple and VastSDK-android ported against the same fixtures plus the
-web's own macros and parser repair, and 172 in `vast-kit`, whole breaks driven
-through a scripted ad element under jsdom. Writing those found six defects —
+web's own macros and parser repair; 200 in `vast-kit`, whole breaks driven
+through a scripted ad element under jsdom, the overlay, and the guard that puts
+back a seek or a speed nobody in the session asked for; and 18 in
+`vast-videojs`, against a fake Video.js player. Writing those found six defects —
 four of them shared with the Android SDK (a stall reported as 402 but ended as
 405, a stall with no `<Error>` URI going unannounced, a failed creative's hold
 leaking into the next, a beacon that keeps failing never ageing out) — and all

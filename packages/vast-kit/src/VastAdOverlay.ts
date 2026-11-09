@@ -77,7 +77,14 @@ export class VastAdOverlay {
     this.root.append(this.clickLayer, this.badge, this.learnMore, this.unmuteButton, this.skipButton)
     layer.appendChild(this.root)
 
-    this.listen(this.clickLayer, 'click', () => this.openClickThrough())
+    this.listen(this.clickLayer, 'click', () => {
+      // The layer is a pointer target, not a keyboard one. A mouse click still
+      // focuses a button, and a focused button answers Space and Enter — so a
+      // viewer pressing Space for "pause" a moment later would be sent to the
+      // advertiser a second time. It lets go of focus as soon as it is used.
+      this.clickLayer.blur()
+      this.openClickThrough()
+    })
     this.listen(this.learnMore, 'click', () => this.openClickThrough())
     this.listen(this.unmuteButton, 'click', () => this.session.setMuted(!this.session.getSnapshot().isMuted))
     this.listen(this.skipButton, 'click', () => {

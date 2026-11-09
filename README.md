@@ -184,7 +184,11 @@ key cannot take the §2.3 promise away from a host that never agreed to keep it.
 - **No seeking, no speed-up.** The ad element has no controls, Picture in
   Picture or remote playback, and the content's control bar is gone for the
   break. `permitsPlaybackControls` in the snapshot is `false` throughout — and in
-  the gap between two queued breaks.
+  the gap between two queued breaks. What no viewer can reach, devtools or a
+  "skip ads" extension still can, so a seek the session did not make is put
+  back where playback had reached and a playback rate goes back to 1× — the
+  web's version of Media3 refusing seeks during an ad. A seek on the hidden film
+  is undone when the break ends.
 - **Nothing unwatched.** A hidden tab keeps decoding video with sound, so the
   session holds the ad while the page is hidden and resumes it when it is back —
   not reported as a pause, because nobody paused. Clicking through to the
