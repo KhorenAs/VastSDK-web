@@ -1,0 +1,17 @@
+{
+  // The whole repository as one program, for `npm run typecheck` and editors:
+  // packages import each other from source, so a change in vast-core is checked
+  // against vast-kit before anything is built. Builds use each package's own
+  // tsconfig.build.json and resolve the others through node_modules.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "paths": {
+      "@kinodaran/vast-core": ["./packages/vast-core/src/index.ts"],
+      "@kinodaran/vast-kit": ["./packages/vast-kit/src/index.ts"],
+      "@kinodaran/vast-videojs": ["./packages/vast-videojs/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src", "packages/*/test", "vitest.config.ts"]
+}

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shape taken from a live Yandex AdFox VAST 3.0 response (URLs and identifiers
+  replaced). Kept because it carries three things synthetic XML never produces:
+  VAST 2.0/3.0 tracking-event names, a `progress` event with an empty offset,
+  and an <Icon> with empty width/height.
+-->
+<VAST version="3.0">
+    <Ad id="15730389">
+        <InLine>
+            <AdSystem>ADFOX</AdSystem>
+            <AdTitle>Linear VPAID Ad</AdTitle>
+            <Description>video ad</Description>
+            <Error><![CDATA[https://ads.test/event?type=error]]></Error>
+            <Impression><![CDATA[https://ads.test/event?type=impression]]></Impression>
+            <Creatives>
+                <Creative>
+                    <Linear skipoffset="00:00:15">
+                        <Duration>00:00:24</Duration>
+                        <TrackingEvents>
+                            <Tracking event="creativeView"><![CDATA[https://ads.test/e/creativeView]]></Tracking>
+                            <Tracking event="start"><![CDATA[https://ads.test/e/start]]></Tracking>
+                            <Tracking event="firstQuartile"><![CDATA[https://ads.test/e/q1]]></Tracking>
+                            <Tracking event="midpoint"><![CDATA[https://ads.test/e/q2]]></Tracking>
+                            <Tracking event="thirdQuartile"><![CDATA[https://ads.test/e/q3]]></Tracking>
+                            <Tracking event="complete"><![CDATA[https://ads.test/e/complete]]></Tracking>
+                            <Tracking event="mute"><![CDATA[https://ads.test/e/mute]]></Tracking>
+                            <Tracking event="unmute"><![CDATA[https://ads.test/e/unmute]]></Tracking>
+                            <Tracking event="pause"><![CDATA[https://ads.test/e/pause]]></Tracking>
+                            <Tracking event="resume"><![CDATA[https://ads.test/e/resume]]></Tracking>
+                            <Tracking event="rewind"><![CDATA[https://ads.test/e/rewind]]></Tracking>
+                            <Tracking event="fullscreen"><![CDATA[https://ads.test/e/fullscreen]]></Tracking>
+                            <Tracking event="expand"><![CDATA[https://ads.test/e/expand]]></Tracking>
+                            <Tracking event="collapse"><![CDATA[https://ads.test/e/collapse]]></Tracking>
+                            <Tracking event="acceptInvitation"><![CDATA[https://ads.test/e/acceptInvitation]]></Tracking>
+                            <Tracking event="close"><![CDATA[https://ads.test/e/close]]></Tracking>
+                            <Tracking event="progress" offset=""><![CDATA[https://ads.test/e/progress]]></Tracking>
+                        </TrackingEvents>
+                        <VideoClicks>
+                            <ClickThrough><![CDATA[https://ads.test/landing]]></ClickThrough>
+                            <ClickTracking><![CDATA[https://ads.test/e/click]]></ClickTracking>
+                        </VideoClicks>
+                        <MediaFiles>
+                            <MediaFile type="video/mp4" width="640" height="360" bitrate="600" delivery="progressive"><![CDATA[https://ads.test/creative.mp4]]></MediaFile>
+                        </MediaFiles>
+                        <Icons>
+                            <Icon program="IconTopLeft" width="" height="" xPosition="left" yPosition="top" offset="00:00:00">
+                                <StaticResource creativeType="image/png"><![CDATA[https://ads.test/icon.png]]></StaticResource>
+                                <IconClicks><IconClickThrough><![CDATA[https://ads.test/icon-landing]]></IconClickThrough></IconClicks>
+                            </Icon>
+                        </Icons>
+                    </Linear>
+                </Creative>
+            </Creatives>
+            <Extensions>
+                <Extension type="uiSettings"><UiHideable>1</UiHideable></Extension>
+            </Extensions>
+        </InLine>
+    </Ad>
+</VAST>

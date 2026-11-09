@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The document KinodaranAds' own ad server returns for `in_stream_video`, taken
+  live from api-dev (host, identifiers and signatures replaced). Kept because it
+  is the tag this SDK has to read for the product it was written for, and because
+  it is shaped unlike every other fixture here:
+
+    - VAST 3.0, from a server whose editor speaks 4.x.
+    - <Error> before <Impression>, and one of each.
+    - No <VideoClicks> at all. A linear ad with nowhere to click is still a
+      linear ad, and a parser that quietly required one would drop our own ads.
+      (It is also why this placement is the one that fills on a television,
+      where a web destination is refused.)
+    - Tracking URIs are long query strings inside CDATA, with raw ampersands.
+    - The uiSettings extension the AdFox tag also carries.
+-->
+<VAST version="3.0">
+  <Ad id="4">
+    <InLine>
+      <AdSystem>KinodaranAds</AdSystem>
+      <AdTitle>TestVast</AdTitle>
+      <Error><![CDATA[https://ads.test/serve/events?event_id=evt_error_0000000000000000000000000000000&event_type=error&request_id=req_00000000000000000000000000000000&auction_id=auc_00000000000000000000000000000000&impression_id=imp_00000000000000000000000000000000&ad_id=4&campaign_id=1&adgroup_id=5&placement=in_stream_video&session_id=freq%3Aredacted&user_key=freq%3Aredacted&sig=redacted]]></Error>
+      <Impression><![CDATA[https://ads.test/serve/events?event_id=evt_impression_0000000000000000000000000000000&event_type=impression&request_id=req_00000000000000000000000000000000&auction_id=auc_00000000000000000000000000000000&impression_id=imp_00000000000000000000000000000000&ad_id=4&campaign_id=1&adgroup_id=5&placement=in_stream_video&session_id=freq%3Aredacted&user_key=freq%3Aredacted&sig=redacted]]></Impression>
+      <Creatives>
+        <Creative id="4">
+          <Linear skipoffset="00:00:05">
+            <Duration>00:00:30</Duration>
+            <TrackingEvents>
+              <Tracking event="start"><![CDATA[https://ads.test/serve/events?event_id=evt_start_0000000000000000000000000000000&event_type=start&request_id=req_00000000000000000000000000000000&auction_id=auc_00000000000000000000000000000000&impression_id=imp_00000000000000000000000000000000&ad_id=4&campaign_id=1&adgroup_id=5&placement=in_stream_video&session_id=freq%3Aredacted&user_key=freq%3Aredacted&sig=redacted]]></Tracking>
+              <Tracking event="firstQuartile"><![CDATA[https://ads.test/serve/events?event_id=evt_firstQuartile_0000000000000000000000000000000&event_type=firstQuartile&request_id=req_00000000000000000000000000000000&auction_id=auc_00000000000000000000000000000000&impression_id=imp_00000000000000000000000000000000&ad_id=4&campaign_id=1&adgroup_id=5&placement=in_stream_video&session_id=freq%3Aredacted&user_key=freq%3Aredacted&sig=redacted]]></Tracking>
+              <Tracking event="midpoint"><![CDATA[https://ads.test/serve/events?event_id=evt_midpoint_0000000000000000000000000000000&event_type=midpoint&request_id=req_00000000000000000000000000000000&auction_id=auc_00000000000000000000000000000000&impression_id=imp_00000000000000000000000000000000&ad_id=4&campaign_id=1&adgroup_id=5&placement=in_stream_video&session_id=freq%3Aredacted&user_key=freq%3Aredacted&sig=redacted]]></Tracking>
+              <Tracking event="thirdQuartile"><![CDATA[https://ads.test/serve/events?event_id=evt_thirdQuartile_0000000000000000000000000000000&event_type=thirdQuartile&request_id=req_00000000000000000000000000000000&auction_id=auc_00000000000000000000000000000000&impression_id=imp_00000000000000000000000000000000&ad_id=4&campaign_id=1&adgroup_id=5&placement=in_stream_video&session_id=freq%3Aredacted&user_key=freq%3Aredacted&sig=redacted]]></Tracking>
+              <Tracking event="complete"><![CDATA[https://ads.test/serve/events?event_id=evt_complete_0000000000000000000000000000000&event_type=complete&request_id=req_00000000000000000000000000000000&auction_id=auc_00000000000000000000000000000000&impression_id=imp_00000000000000000000000000000000&ad_id=4&campaign_id=1&adgroup_id=5&placement=in_stream_video&session_id=freq%3Aredacted&user_key=freq%3Aredacted&sig=redacted]]></Tracking>
+              <Tracking event="skip"><![CDATA[https://ads.test/serve/events?event_id=evt_skip_0000000000000000000000000000000&event_type=skip&request_id=req_00000000000000000000000000000000&auction_id=auc_00000000000000000000000000000000&impression_id=imp_00000000000000000000000000000000&ad_id=4&campaign_id=1&adgroup_id=5&placement=in_stream_video&session_id=freq%3Aredacted&user_key=freq%3Aredacted&sig=redacted]]></Tracking>
+            </TrackingEvents>
+
+            <MediaFiles>
+              <MediaFile delivery="progressive" type="video/mp4" width="1280" height="720"><![CDATA[https://cdn.test/assets/31c4de7c-4eed-4f42-941b-6a0528fa0dcf.mp4]]></MediaFile>
+            </MediaFiles>
+          </Linear>
+        </Creative>
+      </Creatives>
+      <Extensions>
+        <Extension type="uiSettings"><UiHideable>1</UiHideable></Extension>
+      </Extensions>
+    </InLine>
+  </Ad>
+</VAST>

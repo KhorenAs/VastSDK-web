@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="hy">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VastSDK Web Demo</title>
+  </head>
+  <body>
+    <header>
+      <h1>VastSDK Web</h1>
+      <p>VAST 4.3 over Video.js — no Google IMA, no VPAID, no iframes.</p>
+    </header>
+    <main>
+      <section class="stage">
+        <video id="player" class="video-js vjs-big-play-centered" controls playsinline preload="auto"></video>
+        <div class="host-ui" id="host-ui" hidden>
+          <span id="host-ui-label"></span>
+          <button type="button" id="host-ui-skip" disabled>Skip</button>
+        </div>
+        <div class="toolbar">
+          <button type="button" id="midroll">Midroll now</button>
+          <label><input type="checkbox" id="lang-hy" checked /> Հայերեն</label>
+          <span id="state" class="state">idle</span>
+        </div>
+      </section>
+      <aside>
+        <h2>Scenarios</h2>
+        <p class="hint">Pick one, then press play. Once the film is playing, a scenario plays as a midroll.</p>
+        <ol id="scenarios"></ol>
+        <h2>Reported</h2>
+        <ol id="log" class="log"></ol>
+      </aside>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

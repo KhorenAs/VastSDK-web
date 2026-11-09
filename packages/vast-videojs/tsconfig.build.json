@@ -1,0 +1,14 @@
+{
+  // Declarations only, from src alone: tsup bundles the JavaScript, and tsc
+  // (which, from TypeScript 7, no longer exposes the API tsup's dts step needs)
+  // writes the .d.ts files next to it.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "composite": false,
+    "emitDeclarationOnly": true,
+    "types": []
+  },
+  "include": ["src"]
+}

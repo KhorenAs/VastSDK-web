@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# Editors
+.idea/
+.vscode/
+dist-types/
