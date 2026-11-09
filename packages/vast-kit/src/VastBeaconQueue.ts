@@ -11,6 +11,8 @@ export interface VastKeyValueStorage {
 export interface VastQueuedBeacon {
   readonly recordedMillis: number
   readonly url: string
+  /** Retry flushes it has already failed. Absent on a beacon that has only failed its first send. */
+  readonly retries?: number
 }
 
 type Entry = VastQueuedBeacon
@@ -30,11 +32,16 @@ type Entry = VastQueuedBeacon
  * explicit about at-least-once delivery for exactly this reason — and it is
  * what makes two tabs draining the same queue at once harmless.
  *
- * Two limits keep storage from becoming a graveyard. A beacon older than
- * {@link MAX_AGE_MILLIS} is dropped, because a report about yesterday is worth
- * less to an ad server than a clean count; and the queue holds {@link CAPACITY}
- * entries, oldest first out, so a device that spends a week offline does not
- * accumulate a megabyte of URLs it will never send.
+ * Limits keep storage from becoming a graveyard and retries from becoming a
+ * flood. A beacon older than {@link MAX_AGE_MILLIS} is dropped, because a
+ * report about yesterday is worth less to an ad server than a clean count; the
+ * queue holds {@link CAPACITY} entries, oldest first out. And a retry is
+ * rationed: {@link takeForRetry} hands out at most {@link RETRY_BATCH} beacons,
+ * at most once every {@link RETRY_INTERVAL_MILLIS}, and a beacon that has
+ * failed {@link MAX_RETRIES} of those is let go. Without that ration a tracker
+ * that never answers — an ad blocker makes one of every tracker it knows —
+ * had its whole backlog sent again with every new beacon: hundreds of requests
+ * per quartile, until the browser refused the page any more connections.
  */
 export class VastBeaconQueue {
   /** Older than this and a beacon is dropped rather than sent. */
@@ -43,6 +50,15 @@ export class VastBeaconQueue {
   /** Most beacons kept at once. */
   static readonly CAPACITY = 500
 
+  /** The least time between two retry flushes from one page. */
+  static readonly RETRY_INTERVAL_MILLIS = 30_000
+
+  /** The most beacons one retry flush sends. */
+  static readonly RETRY_BATCH = 50
+
+  /** Retry flushes a beacon may fail before it is let go. */
+  static readonly MAX_RETRIES = 5
+
   /** Where the shared queue keeps its entries. */
   static readonly STORAGE_KEY = 'kinodaran.vast.pending-beacons'
 
@@ -50,7 +66,8 @@ export class VastBeaconQueue {
 
   /**
    * The page-wide queue, so retries survive the session that queued them — and
-   * so a host that builds a transport per break does not build a queue per break.
+   * so a host that builds a transport per break does not build a queue per
+   * break, nor a retry ration per break.
    *
    * In `localStorage`, which is per origin and never leaves the device. A queued
    * URL carries whatever the host supplied through the macros — a consent string
@@ -74,44 +91,69 @@ export class VastBeaconQueue {
    */
   private writable = true
 
+  /** When this page last handed out a retry batch. */
+  private lastRetryMillis = Number.NEGATIVE_INFINITY
+
   constructor(
     private readonly storage: VastKeyValueStorage | null,
     private readonly key: string = VastBeaconQueue.STORAGE_KEY,
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  /** Keeps beacons that failed, so the next flush can try again. */
+  /** Keeps beacons that failed their first send, so a later flush can try again. */
   enqueue(urls: readonly string[]): void {
     const recorded = this.now()
     this.requeue(urls.map((url) => ({ recordedMillis: recorded, url })))
   }
 
   /**
-   * Puts back beacons that were drained and failed again, keeping when each
-   * was first recorded. Re-stamping them would let a tracker that never
-   * answers — an ad blocker sees to that — live in storage for ever, carrying
-   * whatever consent string its URL holds past the age limit meant to drop it.
+   * Puts back beacons that were taken and failed again, keeping when each was
+   * first recorded. Re-stamping them would let a tracker that never answers
+   * live in storage for ever, carrying whatever consent string its URL holds
+   * past the age limit meant to drop it. One that has used up its
+   * {@link MAX_RETRIES} is dropped here instead.
    */
   requeue(entries: readonly VastQueuedBeacon[]): void {
-    if (entries.length === 0) return
-    const kept = this.trimmed([...this.load(), ...entries])
-    this.pending = kept
-    this.save(kept)
-    VastLog.notice(`holding ${kept.length} beacon(s) for retry`)
+    const kept = entries.filter((entry) => (entry.retries ?? 0) < VastBeaconQueue.MAX_RETRIES)
+    const dropped = entries.length - kept.length
+    if (dropped > 0) VastLog.notice(`gave up on ${dropped} beacon(s) after ${VastBeaconQueue.MAX_RETRIES} retries`)
+    if (kept.length === 0) return
+    const all = this.trimmed([...this.load(), ...kept])
+    this.pending = all
+    this.save(all)
+    VastLog.notice(`holding ${all.length} beacon(s) for retry`)
   }
 
   /**
-   * Takes everything worth retrying, and forgets it.
+   * The next retry batch — oldest first, at most {@link RETRY_BATCH} — or
+   * nothing when this page took one less than {@link RETRY_INTERVAL_MILLIS} ago.
    *
-   * Taken rather than copied: whoever drains the queue owns delivery from that
-   * point, and re-queues what fails again. Holding on as well would send every
-   * beacon twice on every flush for as long as one of them kept failing.
+   * Taken rather than copied: whoever takes a batch owns its delivery from that
+   * point, and requeues what fails again (with one more retry counted). The
+   * rest stays queued for a later batch.
+   */
+  takeForRetry(): VastQueuedBeacon[] {
+    const now = this.now()
+    if (now - this.lastRetryMillis < VastBeaconQueue.RETRY_INTERVAL_MILLIS) return []
+    const entries = this.trimmed(this.load())
+    if (entries.length === 0) return []
+    this.lastRetryMillis = now
+    const batch = entries.slice(0, VastBeaconQueue.RETRY_BATCH)
+    const rest = entries.slice(batch.length)
+    this.pending = rest
+    this.save(rest)
+    return batch
+  }
+
+  /**
+   * Takes everything worth retrying, and forgets it — unrationed, for a host
+   * that sends the backlog itself.
    */
   drain(): string[] {
     return this.drainEntries().map((entry) => entry.url)
   }
 
-  /** {@link drain}, keeping when each beacon was first recorded, for {@link requeue}. */
+  /** {@link drain}, keeping when each beacon was first recorded and how often it was retried, for {@link requeue}. */
   drainEntries(): VastQueuedBeacon[] {
     const entries = this.trimmed(this.load())
     if (entries.length === 0) return []
@@ -144,16 +186,17 @@ export class VastBeaconQueue {
 
   /**
    * One beacon per line, `recorded<TAB>url` — the format the Android queue
-   * writes. URLs have no raw tabs or newlines (they are percent-encoded before
-   * a URL is stored), so it needs no escaping. A failed write is not worth
-   * interrupting anything for: the beacons are still in memory, and this page
-   * will still try to send them.
+   * writes — with `<TAB>retries` after it once a beacon has failed a retry.
+   * URLs have no raw tabs or newlines (they are percent-encoded before a URL is
+   * stored), so it needs no escaping. A failed write is not worth interrupting
+   * anything for: the beacons are still in memory, and this page will still
+   * try to send them.
    */
   private save(entries: readonly Entry[]): void {
     if (!this.storage) return
     try {
       if (entries.length === 0) this.storage.removeItem(this.key)
-      else this.storage.setItem(this.key, entries.map((e) => `${e.recordedMillis}\t${e.url}\n`).join(''))
+      else this.storage.setItem(this.key, entries.map(line).join(''))
       this.writable = true
     } catch (error) {
       this.writable = false
@@ -168,14 +211,30 @@ export class VastBeaconQueue {
   }
 }
 
+function line(entry: Entry): string {
+  const retries = entry.retries ?? 0
+  return retries > 0 ? `${entry.recordedMillis}\t${entry.url}\t${retries}\n` : `${entry.recordedMillis}\t${entry.url}\n`
+}
+
 function parse(text: string | null): Entry[] {
   if (!text) return []
   const entries: Entry[] = []
-  for (const line of text.split('\n')) {
-    const tab = line.indexOf('\t')
+  for (const raw of text.split('\n')) {
+    const tab = raw.indexOf('\t')
     if (tab <= 0) continue
-    const recorded = Number(line.substring(0, tab))
-    if (Number.isFinite(recorded)) entries.push({ recordedMillis: recorded, url: line.substring(tab + 1) })
+    const recorded = Number(raw.substring(0, tab))
+    if (!Number.isFinite(recorded)) continue
+    let url = raw.substring(tab + 1)
+    let retries = 0
+    const last = url.lastIndexOf('\t')
+    if (last >= 0) {
+      const count = Number(url.substring(last + 1))
+      if (Number.isInteger(count) && count >= 0) {
+        retries = count
+        url = url.substring(0, last)
+      }
+    }
+    entries.push(retries > 0 ? { recordedMillis: recorded, url, retries } : { recordedMillis: recorded, url })
   }
   return entries
 }

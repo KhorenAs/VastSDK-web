@@ -117,6 +117,19 @@ describe('VastBeaconQueue', () => {
     expect(storage.items.get(KEY)).toBe(`1700000000000\t${url('a')}\n1700000000000\t${url('b?x=1&y=%20')}\n`)
   })
 
+  it('adds a retry count to the line once a beacon has failed a retry, and reads both shapes back', () => {
+    const storage = new MemoryStorage()
+    const queue = new VastBeaconQueue(storage, KEY, () => 1700000000000)
+    queue.requeue([{ recordedMillis: 1700000000000, url: url('a'), retries: 2 }])
+    queue.enqueue([url('b')])
+
+    expect(storage.items.get(KEY)).toBe(`1700000000000\t${url('a')}\t2\n1700000000000\t${url('b')}\n`)
+    expect(queue.drainEntries()).toEqual([
+      { recordedMillis: 1700000000000, url: url('a'), retries: 2 },
+      { recordedMillis: 1700000000000, url: url('b') },
+    ])
+  })
+
   it('reads that format back, skipping lines it cannot make sense of', () => {
     const now = 1_700_000_000_000
     const storage = new MemoryStorage()
@@ -333,6 +346,101 @@ describe('VastFetchTransport', () => {
   it('never rejects, and without a queue simply lets a failure go', async () => {
     const fetch = scriptedFetch(() => 'network')
     await expect(new VastFetchTransport(null, 1, 5000, fetch.impl).fire([beacon(url('impression'))])).resolves.toBeUndefined()
+  })
+
+  // MARK: The retry ration
+
+  /**
+   * Found by hand in a browser: with a tracker that never answers, every new
+   * beacon re-sent the whole backlog, twice, so one ad produced dozens of
+   * requests per tracker and a long session ran the page out of connections
+   * (net::ERR_INSUFFICIENT_RESOURCES). An ad blocker makes a tracker like that
+   * of every tracker it knows.
+   */
+  it('re-sends the backlog at most once per interval however many beacons fire — not with every one', async () => {
+    let now = 1_000_000_000
+    const queue = new VastBeaconQueue(new MemoryStorage(), KEY, () => now)
+    const fetch = scriptedFetch(() => 'network')
+    const transport = new VastFetchTransport(queue, 2, 5000, fetch.impl)
+
+    const events = ['impression', 'start', 'firstQuartile', 'midpoint', 'thirdQuartile', 'complete']
+    for (const event of events) {
+      await transport.fire([beacon(url(event))])
+      now += 1000
+    }
+
+    const sends = (target: string) => fetch.calls.filter((call) => call.url === target).length
+    expect(sends(url('impression')), 'its own two attempts, then one retry within the interval').toBe(3)
+    expect(fetch.calls.length, 'six beacons, two attempts each, and one retry batch').toBe(13)
+    expect(queue.count()).toBe(6)
+  })
+
+  it('retries again once the interval has passed', async () => {
+    let now = 1_000_000_000
+    const queue = new VastBeaconQueue(new MemoryStorage(), KEY, () => now)
+    queue.enqueue([url('impression')])
+    const fetch = scriptedFetch(() => 'network')
+    const transport = new VastFetchTransport(queue, 2, 5000, fetch.impl)
+
+    await transport.flushPending()
+    await transport.flushPending()
+    expect(fetch.calls, 'once per interval').toHaveLength(1)
+
+    now += VastBeaconQueue.RETRY_INTERVAL_MILLIS
+    await transport.flushPending()
+    expect(fetch.calls).toHaveLength(2)
+  })
+
+  it('gives a queued beacon one attempt per batch, where a first send gets two', async () => {
+    const queue = new VastBeaconQueue(new MemoryStorage())
+    queue.enqueue([url('old')])
+    const fetch = scriptedFetch(() => 'network')
+
+    await new VastFetchTransport(queue, 2, 5000, fetch.impl).fire([beacon(url('new'))])
+
+    expect(fetch.calls.map((call) => call.url).sort()).toEqual([url('new'), url('new'), url('old')])
+  })
+
+  it('sends at most RETRY_BATCH queued beacons in one flush, oldest first, and keeps the rest', async () => {
+    let now = 1_000_000_000
+    const queue = new VastBeaconQueue(new MemoryStorage(), KEY, () => now)
+    for (let i = 0; i < VastBeaconQueue.RETRY_BATCH + 10; i++) {
+      queue.enqueue([url(`b${i}`)])
+      now += 1
+    }
+    const fetch = scriptedFetch(() => 'answer')
+
+    await new VastFetchTransport(queue, 1, 5000, fetch.impl).flushPending()
+
+    expect(fetch.calls).toHaveLength(VastBeaconQueue.RETRY_BATCH)
+    expect(fetch.calls[0]!.url).toBe(url('b0'))
+    expect(queue.count()).toBe(10)
+  })
+
+  it('lets go of a beacon after MAX_RETRIES failed batches, well before it would age out', async () => {
+    let now = 1_000_000_000
+    const queue = new VastBeaconQueue(new MemoryStorage(), KEY, () => now)
+    queue.enqueue([url('blocked')])
+    const fetch = scriptedFetch(() => 'network')
+    const transport = new VastFetchTransport(queue, 2, 5000, fetch.impl)
+
+    for (let i = 0; i < VastBeaconQueue.MAX_RETRIES + 2; i++) {
+      await transport.flushPending()
+      now += VastBeaconQueue.RETRY_INTERVAL_MILLIS
+    }
+
+    expect(fetch.calls).toHaveLength(VastBeaconQueue.MAX_RETRIES)
+    expect(queue.count()).toBe(0)
+  })
+
+  it('shares one ration across every transport on the page, as one session per break would build', async () => {
+    const queue = new VastBeaconQueue(new MemoryStorage())
+    queue.enqueue([url('old')])
+    const fetch = scriptedFetch(() => 'network')
+
+    for (let session = 0; session < 5; session++) await new VastFetchTransport(queue, 2, 5000, fetch.impl).flushPending()
+
+    expect(fetch.calls).toHaveLength(1)
   })
 
   it('lets a beacon that keeps failing age out from when it was first recorded', async () => {

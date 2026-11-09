@@ -47,39 +47,53 @@ export class VastFetchTransport implements VastBeaconTransport {
   async fire(beacons: readonly VastBeacon[]): Promise<void> {
     if (beacons.length === 0) return
     // Earlier failures ride along with current traffic, so a retry costs no
-    // timer of its own and happens when the network is known to work.
-    const retries = this.queue?.drainEntries() ?? []
+    // timer of its own and happens when the network is known to work — as
+    // much as the queue's ration allows, which is one batch per interval for
+    // the whole page, not the whole backlog with every beacon.
+    const retries = this.queue?.takeForRetry() ?? []
     await this.deliver([...retries, ...beacons.map((b) => ({ url: b.url, recordedMillis: null }))])
   }
 
-  /** Sends whatever the queue holds, with no new beacon to carry it — at session start, say. */
+  /** Sends the next retry batch, with no new beacon to carry it — at session start, say. */
   async flushPending(): Promise<void> {
-    const retries = this.queue?.drainEntries() ?? []
+    const retries = this.queue?.takeForRetry() ?? []
     if (retries.length > 0) await this.deliver(retries)
   }
 
   /**
-   * `recordedMillis` is `null` on a beacon's first attempt, and the moment it
-   * was first held on a retry — so a beacon that keeps failing still ages out
-   * from when it was recorded, not from its latest failure.
+   * `recordedMillis` is `null` on a beacon's first send, and the moment it was
+   * first held on a retry — so a beacon that keeps failing still ages out from
+   * when it was recorded, not from its latest failure.
    */
   private async deliver(beacons: readonly Outgoing[]): Promise<void> {
-    const results = await Promise.all(beacons.map(async (beacon) => ((await this.send(beacon.url)) ? null : beacon)))
+    const results = await Promise.all(
+      beacons.map(async (beacon) => {
+        // A first send gets its immediate retry; a queued one has had that
+        // already, and one attempt per batch is what keeps a dead tracker's
+        // backlog from doubling every flush.
+        const attempts = beacon.recordedMillis === null ? this.maxAttempts : 1
+        return (await this.send(beacon.url, attempts)) ? null : beacon
+      }),
+    )
     const undelivered = results.filter((beacon): beacon is Outgoing => beacon !== null)
     if (undelivered.length === 0) return
     VastLog.warning(`${undelivered.length} beacon(s) undelivered`)
     this.queue?.enqueue(undelivered.filter((b) => b.recordedMillis === null).map((b) => b.url))
-    this.queue?.requeue(undelivered.filter((b): b is VastQueuedBeacon => b.recordedMillis !== null))
+    this.queue?.requeue(
+      undelivered
+        .filter((b): b is VastQueuedBeacon => b.recordedMillis !== null)
+        .map((b) => ({ recordedMillis: b.recordedMillis, url: b.url, retries: (b.retries ?? 0) + 1 })),
+    )
   }
 
   /** @returns whether the beacon landed — or can never land, which is the same for the queue. */
-  private async send(url: string): Promise<boolean> {
+  private async send(url: string, attempts: number): Promise<boolean> {
     if (!isFetchable(url)) {
       // Not a URL anyone could fetch, now or later: queueing it would only carry
       // it from flush to flush until it aged out.
       return true
     }
-    for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       const controller = typeof AbortController === 'undefined' ? null : new AbortController()
       const timer = controller ? setTimeout(() => controller.abort(), this.timeoutMillis) : null
       try {
@@ -188,6 +202,7 @@ export class VastHttpStatusError extends Error {
 interface Outgoing {
   readonly url: string
   readonly recordedMillis: number | null
+  readonly retries?: number
 }
 
 function isAbort(error: unknown): boolean {

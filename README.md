@@ -233,8 +233,11 @@ every vendor that asked is told `verificationNotExecuted` and every
 
 Beacons go out as `fetch` with `keepalive`, so a tab closing the moment an ad
 completes does not take the `complete` request down with it. What fails is kept
-in a `localStorage` retry queue — the same format as Android's — and sent again
-on a later flush, across page loads.
+in a `localStorage` retry queue — Android's format — and sent again on a later
+flush, across page loads. Retries are rationed: one batch of at most 50, at most
+every 30 seconds per page, and a beacon that fails five of them is let go. An
+ad blocker turns every tracker it knows into one that never answers; unrationed,
+that backlog went out again with every new beacon.
 
 **A browser knows less about delivery than an app does.** Tracking hosts send no
 CORS headers, so beacons go out `no-cors` and their responses are opaque: the

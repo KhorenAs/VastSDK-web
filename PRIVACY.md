@@ -51,7 +51,8 @@ stays `-1` unless the host has a first-party one and the viewer's consent to use
 
 One `localStorage` entry, `kinodaran.vast.pending-beacons`: tracking URLs whose
 request failed at the network level, kept so they can be sent again later — at
-most 500 of them, and none older than six hours. They carry whatever the macros
+most 500 of them, none older than six hours, and none retried more than five
+times. They carry whatever the macros
 put in them, a consent string among them, which is why they are not kept longer.
 Storage is per origin and never leaves the browser. Where `localStorage` is
 unavailable the queue lives in memory for the life of the page.

@@ -5,9 +5,9 @@ what blocks the road rather than by effort. Items that close are struck through
 with the commit that closed them — a list that only grows is a list nobody reads
 twice.
 
-State: `npm test` passes 395 tests — 177 in `vast-core`, every core suite of
+State: `npm test` passes 402 tests — 177 in `vast-core`, every core suite of
 VastSDK-apple and VastSDK-android ported against the same fixtures plus the
-web's own macros and parser repair; 200 in `vast-kit`, whole breaks driven
+web's own macros and parser repair; 207 in `vast-kit`, whole breaks driven
 through a scripted ad element under jsdom, the overlay, and the guard that puts
 back a seek or a speed nobody in the session asked for; and 18 in
 `vast-videojs`, against a fake Video.js player. Writing those found six defects —
@@ -62,7 +62,12 @@ more, which changes nothing for XML broken any other way.
 **6a. Port the shared fixes back.** Four of the defects the kit tests found are
 in the Android SDK too, by inspection — `stall()`, `outcomeFor()`, `slotFailed()`
 and the retry queue's re-stamping in `VastHttpTransport` — and the Apple SDK is
-worth checking for the same four.
+worth checking for the same four. A fifth was found testing the demo by hand: a
+tracker that never answers had the whole retry backlog re-sent with every new
+beacon (an ad blocker makes one of every tracker it knows), which ran a long
+browser session out of connections. Here retries are now rationed — one batch of
+50 at most every 30 seconds, five tries per beacon. Android's `fire()` drains
+the whole queue the same way and should get the same ration.
 
 **6b. A resume the browser refuses.** When the page comes back and the browser
 will not restart the held ad, the ad sits paused while the state says `playing`,
