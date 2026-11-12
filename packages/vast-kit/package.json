@@ -23,6 +23,7 @@
     "build": "tsup src/index.ts --format esm,cjs --sourcemap --clean --target es2017 && tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@kinodaran/vast-core": "0.1.0"
+    "@kinodaran/vast-core": "0.1.0",
+    "dashjs": "^5.3.0"
   }
 }

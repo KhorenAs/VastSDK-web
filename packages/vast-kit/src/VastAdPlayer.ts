@@ -1,5 +1,7 @@
 import { VastError } from '@kinodaran/vast-core'
+import type { MediaPlayerClass } from 'dashjs'
 import { VastLog } from './VastLog.js'
+import { DASH_MIME } from './VastWebVideoFormats.js'
 
 /** What the ad element tells the session about the creative it was handed. */
 export interface VastAdPlayerListener {
@@ -56,6 +58,8 @@ export class VastAdPlayer {
   readonly video: HTMLVideoElement
 
   private listener: VastAdPlayerListener | null = null
+  private dashPlayer: MediaPlayerClass | null = null
+  private cancelDashLoad: (() => void) | null = null
   private source: string | null = null
   private startedSource: string | null = null
   private loadedSource: string | null = null
@@ -142,7 +146,10 @@ export class VastAdPlayer {
     url: string,
     listener: VastAdPlayerListener,
     sound: { volume: number; muted: boolean },
+    mimeType?: string,
   ): Promise<VastStartResult> {
+    this.listener = null
+    this.releaseDash()
     this.listener = listener
     this.source = url
     this.startedSource = null
@@ -153,9 +160,56 @@ export class VastAdPlayer {
     this.video.playbackRate = 1
     this.video.muted = sound.muted
     this.video.volume = clamp(sound.volume)
-    this.video.src = url
-    this.video.load()
+    if (mimeType?.toLowerCase() === DASH_MIME) {
+      if (!await this.attachDash(url, listener) || this.listener !== listener) return 'interrupted'
+    } else {
+      this.video.src = url
+      this.video.load()
+    }
     return this.start()
+  }
+
+  private async attachDash(url: string, listener: VastAdPlayerListener): Promise<boolean> {
+    try {
+      const { MediaPlayer } = await import('dashjs')
+      if (this.listener !== listener) return false
+      const player = MediaPlayer().create()
+      this.dashPlayer = player
+      const events = MediaPlayer.events
+      return await new Promise<boolean>((resolve) => {
+        const ready = () => {
+          player.off(events.STREAM_INITIALIZED, ready)
+          this.cancelDashLoad = null
+          resolve(true)
+        }
+        this.cancelDashLoad = () => resolve(false)
+        player.on(events.STREAM_INITIALIZED, ready)
+        player.on(events.ERROR, () => {
+          // Let dash.js finish dispatching before a fallback destroys this instance.
+          queueMicrotask(() => {
+            if (this.listener === listener && this.dashPlayer === player) {
+              listener.failed(VastError.MEDIA_FILE_DISPLAY_PROBLEM)
+            }
+          })
+        })
+        player.initialize(this.video, url, false)
+      })
+    } catch {
+      if (this.listener === listener) listener.failed(VastError.MEDIA_FILE_DISPLAY_PROBLEM)
+      return false
+    }
+  }
+
+  private releaseDash(): void {
+    const player = this.dashPlayer
+    this.dashPlayer = null
+    this.cancelDashLoad?.()
+    this.cancelDashLoad = null
+    try {
+      player?.destroy()
+    } catch (error) {
+      VastLog.warning(`could not release DASH playback: ${String(error)}`)
+    }
   }
 
   /**
@@ -215,6 +269,7 @@ export class VastAdPlayer {
   /** Lets go of the creative, so the element stops buffering it. */
   unload(): void {
     this.listener = null
+    this.releaseDash()
     this.source = null
     this.startedSource = null
     this.loadedSource = null

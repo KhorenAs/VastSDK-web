@@ -48,6 +48,7 @@ import { VastLog } from './VastLog.js'
 import type { VastMeasurement, VastMeasurementEvent } from './VastMeasurement.js'
 import { VastMediaSessionLock } from './VastMediaSessionLock.js'
 import { vastStringsFor } from './VastStrings.js'
+import { DASH_MIME, HLS_MIMES, preferredWebVideoFormat, supportsDashPlayback } from './VastWebVideoFormats.js'
 import { VastVideoClock } from './VastVideoClock.js'
 
 export interface VastAdSessionOptions {
@@ -81,6 +82,7 @@ export interface VastEnvironment {
   readonly isTelevision: boolean
   /** Whether this browser can decode a MIME type in a `<video>` element. */
   readonly canPlayType: (mimeType: string) => boolean
+  readonly supportsDash: boolean
   /** Device pixels of the screen, for media selection before the container has a size. */
   readonly screenSize: () => { width: number; height: number } | null
   /** `[PAGEURL]` and `[DOMAIN]`. */
@@ -97,7 +99,8 @@ export interface VastEnvironment {
 interface Slot {
   readonly index: number
   readonly ad: VastAd
-  readonly mediaFile: VastMediaFile
+  mediaFile: VastMediaFile
+  readonly mp4Fallback: VastMediaFile | null
   readonly engine: VastTrackingEngine
   loadedReported: boolean
   started: boolean
@@ -422,8 +425,21 @@ export class VastAdSession {
       return null
     }
     let file: VastMediaFile
+    let mp4Fallback: VastMediaFile | null = null
     try {
-      file = this.selector.select(ad.linear.mediaFiles, this.capabilities(ad.linear.mediaFiles))
+      const files = ad.linear.mediaFiles
+      const capabilities = this.capabilities(files)
+      const preferred = preferredWebVideoFormat(this.environment.userAgent, this.environment.canPlayType, this.environment.supportsDash)
+      const adaptive = files.filter((media) => isAdaptiveMedia(media.mimeType))
+      const preferredFiles = adaptive.filter((media) => {
+        const type = media.mimeType.toLowerCase()
+        return capabilities.supportedMimeTypes.has(type) &&
+          (preferred === 'hls' ? HLS_MIMES.includes(type) : preferred === 'dash' && type === DASH_MIME)
+      })
+      const mp4 = adaptive.length ? files.filter((media) =>
+        media.mimeType.toLowerCase() === 'video/mp4' && capabilities.supportedMimeTypes.has('video/mp4')) : []
+      file = this.selector.select(preferredFiles.length ? preferredFiles : mp4.length ? mp4 : files, capabilities)
+      if (isAdaptiveMedia(file.mimeType) && mp4.length) mp4Fallback = this.selector.select(mp4, capabilities)
     } catch (error) {
       if (!(error instanceof VastException)) throw error
       this.failUnplayed(ad, VastError.NO_SUPPORTED_MEDIA_FILE)
@@ -433,6 +449,7 @@ export class VastAdSession {
       index,
       ad,
       mediaFile: file,
+      mp4Fallback,
       engine: new VastTrackingEngine(ad, null, this.measurement !== null),
       loadedReported: false,
       started: false,
@@ -542,32 +559,44 @@ export class VastAdSession {
       this.timeUntilSkip = null
       this.state = { type: 'loading' }
       this.publish()
-      const listener: VastAdPlayerListener = {
-        loaded: () => this.slotPrepared(slot),
-        started: () => this.slotStarted(slot, total),
-        playbackChanged: (wants) => this.notePlayback(slot, wants),
-        ended: () => this.slotLeft(slot, true),
-        failed: (error) => this.slotFailed(slot, error),
-      }
-      const timeout = this.configuration.mediaLoadTimeoutSeconds
-      if (timeout > 0) {
-        slot.loadTimer = setTimeout(() => {
-          if (!slot.started) this.slotFailed(slot, VastError.MEDIA_FILE_TIMEOUT)
-        }, timeout * 1000)
-      }
-      const volume = this.content?.volume ?? 1
-      void this.adPlayer.load(slot.mediaFile.url, listener, { volume, muted: this.isMuted }).then((result) => {
-        if (slot.finished) return
-        if (result === 'mutedByPolicy') {
-          this.isMuted = true
-          this.mutedByAutoplayPolicy = true
-          this.publish()
-        } else if (result === 'refused') {
-          // Autoplay is off and nothing has touched the element: the ad cannot
-          // be shown, which is a display problem rather than a missing file.
-          this.slotFailed(slot, VastError.MEDIA_FILE_DISPLAY_PROBLEM)
+      const load = (file: VastMediaFile, fallback: VastMediaFile | null): void => {
+        const failed = (error: VastError): void => {
+          if (slot.finished || slot.mediaFile !== file) return
+          if (!slot.started && fallback) {
+            this.clearLoadTimer(slot)
+            this.adPlayer.unload()
+            slot.mediaFile = fallback
+            load(fallback, null)
+            return
+          }
+          this.slotFailed(slot, error)
         }
-      })
+        const listener: VastAdPlayerListener = {
+          loaded: () => this.slotPrepared(slot),
+          started: () => this.slotStarted(slot, total),
+          playbackChanged: (wants) => this.notePlayback(slot, wants),
+          ended: () => this.slotLeft(slot, true),
+          failed,
+        }
+        const timeout = this.configuration.mediaLoadTimeoutSeconds
+        if (timeout > 0) {
+          slot.loadTimer = setTimeout(() => {
+            if (!slot.started) failed(VastError.MEDIA_FILE_TIMEOUT)
+          }, timeout * 1000)
+        }
+        const volume = this.content?.volume ?? 1
+        void this.adPlayer.load(file.url, listener, { volume, muted: this.isMuted }, file.mimeType).then((result) => {
+          if (slot.finished || slot.mediaFile !== file) return
+          if (result === 'mutedByPolicy') {
+            this.isMuted = true
+            this.mutedByAutoplayPolicy = true
+            this.publish()
+          } else if (result === 'refused') {
+            this.slotFailed(slot, VastError.MEDIA_FILE_DISPLAY_PROBLEM)
+          }
+        })
+      }
+      load(slot.mediaFile, slot.mp4Fallback)
     })
   }
 
@@ -638,7 +667,11 @@ export class VastAdSession {
     }
     if (!this.environment.isPageVisible()) this.hold('offScreen')
 
-    const clock = this.configuration.clock ?? new VastVideoClock(this.adPlayer.video, slot.mediaFile.url)
+    const video = this.adPlayer.video
+    // dash.js attaches a MediaSource URL to the element. Tracking macros still use the manifest URL.
+    const playbackUrl = slot.mediaFile.mimeType.toLowerCase() === DASH_MIME
+      ? video.currentSrc || video.src : slot.mediaFile.url
+    const clock = this.configuration.clock ?? new VastVideoClock(video, playbackUrl)
     slot.clock = clock
     let lastAdvance = this.environment.uptimeSeconds()
     let lastPosition = -1
@@ -992,21 +1025,18 @@ export class VastAdSession {
    */
   private capabilities(files: readonly VastMediaFile[]): VastMediaCapabilities {
     const size = this.containerPixels() ?? this.environment.screenSize() ?? { width: 1280, height: 720 }
-    // What this browser says it decodes, asked of the files actually on offer
-    // rather than assumed: the ad plays in a plain `<video>`, with no hls.js
-    // behind it, so HLS counts only where the browser plays it natively. A
-    // format chosen and then failed costs a 405 where refusing it would have
-    // let an alternative play.
     const supported = new Set<string>()
     for (const file of files) {
       const type = file.mimeType.toLowerCase()
-      if (!supported.has(type) && this.environment.canPlayType(file.mimeType)) supported.add(type)
+      const playable = type === DASH_MIME ? this.environment.supportsDash :
+        HLS_MIMES.includes(type) ? HLS_MIMES.some(this.environment.canPlayType) : this.environment.canPlayType(file.mimeType)
+      if (playable) supported.add(type)
     }
     return createMediaCapabilities({
       width: size.width,
       height: size.height,
       supportedMimeTypes: supported,
-      supportsStreaming: this.environment.canPlayType('application/vnd.apple.mpegurl'),
+      supportsStreaming: this.environment.supportsDash || HLS_MIMES.some(this.environment.canPlayType),
     })
   }
 
@@ -1290,6 +1320,11 @@ function shallowEqual(a: VastAdSnapshot, b: VastAdSnapshot): boolean {
   return keys.every((key) => a[key] === b[key])
 }
 
+function isAdaptiveMedia(mimeType: string): boolean {
+  const type = mimeType.toLowerCase()
+  return type === DASH_MIME || HLS_MIMES.includes(type)
+}
+
 function defaultEnvironment(configuration: VastConfiguration): VastEnvironment {
   const doc = typeof document !== 'undefined' ? document : null
   const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : null
@@ -1310,6 +1345,7 @@ function defaultEnvironment(configuration: VastConfiguration): VastEnvironment {
       probe ??= doc.createElement('video')
       return probe.canPlayType(mimeType) !== ''
     },
+    supportsDash: supportsDashPlayback(),
     screenSize: () => {
       if (typeof screen === 'undefined') return null
       const ratio = typeof devicePixelRatio === 'number' && devicePixelRatio > 0 ? devicePixelRatio : 1

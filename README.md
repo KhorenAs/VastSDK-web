@@ -24,10 +24,8 @@ outright is a pre-3.0 one, which gets VAST error 102.
 demo/                     Video.js page with the Apple and Android demos' scenarios
 ```
 
-About 25 KB minified and gzipped for all three, against roughly four times that
-for `ima3.js` alone. ES2017 output, ESM and CommonJS, with type declarations —
-so it drops into a Create React App build, its Jest, and the older Chromium of a
-Tizen or webOS TV.
+The SDK ships ES2017 output, ESM and CommonJS, and type declarations.
+The browser loads dash.js on demand when it selects a DASH ad.
 
 ### Installing
 
@@ -81,6 +79,24 @@ A response already in hand goes in as XML:
 
 ```ts
 vast.session.playBreak({ xml, baseUrl: tagUrl })
+```
+
+### Hosted VAST on the web
+
+Pass the player's capabilities with the Kinodaran Ads request. Safari advertises
+HLS when its video element supports it. Chrome and Firefox advertise DASH when
+Media Source Extensions can play H.264. The hosted VAST can also offer MP4 for
+devices without adaptive playback or when a stream fails before playback starts.
+
+```ts
+import { webVideoFormats } from '@kinodaran/vast-kit'
+
+const requestBody = {
+  ...adRequest,
+  device: { ...adRequest.device, platform: 'web' },
+  video_formats: webVideoFormats(),
+}
+// Send requestBody to /serve/ad-request and pass the returned VAST XML to playBreak.
 ```
 
 ### Without Video.js
