@@ -675,6 +675,306 @@ describe('VastAdSession', () => {
     })
   })
 
+  describe('Picture-in-Picture', () => {
+    afterEach(() => {
+      Reflect.deleteProperty(document, 'pictureInPictureElement')
+      Reflect.deleteProperty(document, 'exitPictureInPicture')
+    })
+
+    it('tracks a server mid-roll on the borrowed MP4 element and restores the film before resuming', async () => {
+      const film = document.createElement('video')
+      const ad = new ScriptedMedia(film)
+      const filmSource = 'https://cdn.test/film.mp4'
+      film.src = filmSource
+      const content = new FakeContent()
+      // What the lending player hears: hushed from the lend until the film is back.
+      const hushes: string[] = []
+      const hush = () => {
+        hushes.push('hushed')
+        return () => hushes.push('hears again')
+      }
+      const restore = vi.fn(async () => {
+        expect(ad.source).toBe(mediaUrl('a1'))
+        expect(ad.paused).toBe(true)
+        expect(content.calls).toEqual(['pause'])
+        expect(hushes, 'still hushed while the film loads again').toEqual(['hushed'])
+        film.src = filmSource
+      })
+      const h = harness({
+        documents: { [TAG]: inLine('a1') },
+        content: Object.assign(content, { videoElement: film, borrowVideoForPiP: () => ({ video: film, restore, hush }) }),
+        pageVisible: false,
+      })
+      h.container.prepend(film)
+      Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, value: film })
+
+      const done = h.session.playBreak(TAG, { position: 'midroll' })
+      await h.settle()
+      expect(h.session.adPlayer.video).toBe(film)
+      expect(ad.source).toBe(mediaUrl('a1'))
+      expect(ad.paused).toBe(false)
+      expect(ad.calls).not.toContain('load')
+      expect(h.ad.source).toBeNull()
+      h.play(0, 10)
+      ad.reachEnd()
+
+      expect(await done).toEqual({ outcome: { type: 'completed' }, adsStarted: 1 })
+      expect(h.reported).toEqual(FULL_RUN)
+      expect(restore).toHaveBeenCalledOnce()
+      expect(ad.source).toBe(filmSource)
+      expect(content.calls).toEqual(['pause', 'resume'])
+      expect(document.pictureInPictureElement).toBe(film)
+      expect(hushes).toEqual(['hushed', 'hears again'])
+    })
+
+    it('plays an HLS creative in the lent element too, and a DASH one in its own', async () => {
+      for (const [mimeType, lent] of [['application/x-mpegURL', true], ['application/dash+xml', false]] as const) {
+        const film = document.createElement('video')
+        new ScriptedMedia(film)
+        const borrow = vi.fn(() => ({ video: film, restore: async () => undefined }))
+        const h = harness({
+          documents: { [TAG]: inLine({ id: 'a1', mimeType }) },
+          content: Object.assign(new FakeContent(), { videoElement: film, borrowVideoForPiP: borrow }),
+          environment: { supportsDash: true },
+        })
+        h.container.prepend(film)
+        Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, value: film })
+        void h.session.playBreak(TAG, { position: 'midroll' })
+        await h.settle()
+        expect(borrow, mimeType).toHaveBeenCalledTimes(lent ? 1 : 0)
+        h.dispose()
+      }
+    })
+
+    /** A film on a hidden page, in PiP unless told otherwise, and a browser that moves the window on request. */
+    function setup(options: { filmInPictureInPicture?: boolean } = {}) {
+      const film = document.createElement('video')
+      const content = Object.assign(new FakeContent(), { videoElement: film })
+      const h = harness({ content, documents: { [TAG]: inLine('a1') }, pageVisible: false })
+      h.container.prepend(film)
+      const ad = h.session.adPlayer.video
+      let inPictureInPicture: HTMLVideoElement | null = options.filmInPictureInPicture === false ? null : film
+      /** The browser has moved the window: the element in it leaves, `video` enters. */
+      const open = (video: HTMLVideoElement | null): void => {
+        const previous = inPictureInPicture
+        inPictureInPicture = video
+        previous?.dispatchEvent(new Event('leavepictureinpicture'))
+        video?.dispatchEvent(new Event('enterpictureinpicture'))
+      }
+      const request = (video: HTMLVideoElement) => vi.fn(async () => {
+        open(video)
+        return {} as PictureInPictureWindow
+      })
+      const exit = vi.fn(async () => open(null))
+      Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, get: () => inPictureInPicture })
+      Object.defineProperty(document, 'exitPictureInPicture', { configurable: true, value: exit })
+      ad.requestPictureInPicture = request(ad)
+      film.requestPictureInPicture = request(film)
+      return {
+        h, ad, film, open, exit,
+        close: () => open(null),
+        /** WebKit reporting the film's exit after the ad's entry: the document forgets who is in the window. */
+        lateExit(): void {
+          inPictureInPicture = null
+          film.dispatchEvent(new Event('leavepictureinpicture'))
+        },
+      }
+    }
+
+    it('plays the mid-roll in the existing PiP window and restores the film before unloading the ad', async () => {
+      const { h, ad, film } = setup()
+      const done = h.session.playBreak(TAG, { position: 'midroll' })
+      await h.settle()
+      expect(document.pictureInPictureElement).toBe(ad)
+      expect(ad.hasAttribute('disablepictureinpicture')).toBe(false)
+      expect(h.ad.paused).toBe(false)
+
+      const restore = vi.mocked(film.requestPictureInPicture)
+      const returnToFilm = restore.getMockImplementation()!
+      restore.mockImplementation(() => {
+        expect(h.ad.source).toBe(mediaUrl('a1'))
+        return returnToFilm()
+      })
+      await h.finishAd()
+      expect(await done).toEqual({ outcome: { type: 'completed' }, adsStarted: 1 })
+      expect(restore).toHaveBeenCalledOnce()
+      expect(document.pictureInPictureElement).toBe(film)
+      expect(ad.hasAttribute('disablepictureinpicture')).toBe(true)
+      expect(h.content!.calls).toEqual(['pause', 'resume'])
+    })
+
+    it('holds a hidden ad when the viewer closes PiP and leaves PiP closed after the break', async () => {
+      const { h, film, close } = setup()
+      const done = h.session.playBreak(TAG, { position: 'midroll' })
+      await h.settle()
+      close()
+      await h.settle()
+      expect(h.ad.paused).toBe(true)
+
+      h.setPageVisible(true)
+      await h.settle()
+      expect(h.ad.paused).toBe(false)
+      await h.finishAd()
+      expect((await done).outcome.type).toBe('completed')
+      expect(film.requestPictureInPicture).not.toHaveBeenCalled()
+      expect(document.pictureInPictureElement).toBeNull()
+    })
+
+    it('gives the window back to the film in Safari after WebKit has emptied pictureInPictureElement', async () => {
+      const { h, ad, film, open, exit, lateExit } = setup()
+      let adMode = 'inline'
+      Object.defineProperty(ad, 'webkitPresentationMode', { configurable: true, get: () => adMode })
+      ad.requestPictureInPicture = vi.fn(async () => {
+        adMode = 'picture-in-picture'
+        open(ad)
+        lateExit()
+        return {} as PictureInPictureWindow
+      })
+      film.requestPictureInPicture = vi.fn(async () => {
+        adMode = 'inline'
+        open(film)
+        return {} as PictureInPictureWindow
+      })
+      const done = h.session.playBreak(TAG, { position: 'midroll' })
+      await h.settle()
+      expect(document.pictureInPictureElement).toBeNull()
+      expect(h.ad.paused, 'the ad is in the window, so it is seen, hidden page or not').toBe(false)
+
+      await h.finishAd()
+      expect((await done).outcome.type).toBe('completed')
+      expect(film.requestPictureInPicture).toHaveBeenCalledOnce()
+      expect(document.pictureInPictureElement).toBe(film)
+      expect(exit).not.toHaveBeenCalled()
+      expect(ad.hasAttribute('disablepictureinpicture')).toBe(true)
+      expect(h.content!.calls).toEqual(['pause', 'resume'])
+    })
+
+    it('makes a mid-roll on a hidden page wait, with the content playing on, until the page is shown', async () => {
+      // Firefox: its PiP window has no API, so a film playing there cannot be told apart from a background tab.
+      const h = harness({ documents: { [TAG]: inLine('a1') }, pageVisible: false })
+      const done = h.session.playBreak(TAG, { position: 'midroll' })
+      await h.settle()
+      expect(h.content!.calls, 'nothing stops for an ad nobody could see').toEqual([])
+      expect(h.ad.source).toBeNull()
+      expect(h.reported).toEqual([])
+
+      h.setPageVisible(true)
+      await h.settle()
+      expect(h.content!.calls).toEqual(['pause'])
+      expect(h.events).toEqual(['started a1 1/1'])
+      expect(h.ad.paused).toBe(false)
+      await h.finishAd()
+      expect(await done).toEqual({ outcome: { type: 'completed' }, adsStarted: 1 })
+      expect(h.content!.calls).toEqual(['pause', 'resume'])
+    })
+
+    it('starts a waiting mid-roll as soon as the content opens a PiP window the ad can take over', async () => {
+      const { h, ad, film, open } = setup({ filmInPictureInPicture: false })
+      const done = h.session.playBreak(TAG, { position: 'midroll' })
+      await h.settle()
+      expect(h.content!.calls).toEqual([])
+
+      open(film)
+      await h.settle()
+      expect(h.content!.calls).toEqual(['pause'])
+      expect(document.pictureInPictureElement).toBe(ad)
+      expect(h.ad.paused).toBe(false)
+      await h.finishAd()
+      expect((await done).outcome.type).toBe('completed')
+      expect(document.pictureInPictureElement).toBe(film)
+    })
+
+    it('lets go of a waiting mid-roll when the session is destroyed, leaving the content alone', async () => {
+      const h = harness({ documents: { [TAG]: inLine('a1') }, pageVisible: false })
+      const done = h.session.playBreak(TAG, { position: 'midroll' })
+      await h.settle()
+      h.session.destroy()
+      expect((await done).adsStarted).toBe(0)
+      expect(h.content!.calls).toEqual([])
+      expect(h.reported).toEqual([])
+    })
+
+    it('still holds a pre-roll on a hidden page: the content is already waiting for it', async () => {
+      const h = harness({ documents: { [TAG]: inLine('a1') }, pageVisible: false })
+      await startPreroll(h)
+      expect(h.content!.calls).toEqual(['pause'])
+      expect(h.events).toEqual(['started a1 1/1'])
+      expect(h.ad.paused).toBe(true)
+    })
+
+    it('keeps the ad allowed in PiP while a slow handoff is still under way', async () => {
+      useFakeTimers()
+      const { h, ad, film, open } = setup()
+      let answer!: () => void
+      ad.requestPictureInPicture = vi.fn(() => new Promise<PictureInPictureWindow>((resolve) => {
+        answer = () => {
+          open(ad)
+          resolve({} as PictureInPictureWindow)
+        }
+      }))
+      const done = h.session.playBreak(TAG, { position: 'midroll' })
+      await h.settle()
+      // Safari closes the film's window and opens the ad's, animating both.
+      vi.advanceTimersByTime(2500)
+      await h.settle()
+      expect(ad.hasAttribute('disablepictureinpicture'), 'switching it off would close the window it is entering').toBe(false)
+
+      answer()
+      await h.settle()
+      expect(document.pictureInPictureElement).toBe(ad)
+      expect(h.ad.paused).toBe(false)
+      await h.finishAd()
+      expect((await done).outcome.type).toBe('completed')
+      expect(document.pictureInPictureElement).toBe(film)
+      expect(ad.hasAttribute('disablepictureinpicture')).toBe(true)
+    })
+
+    it('closes the window when the film cannot take it back, rather than leave the emptied ad in it', async () => {
+      const { h, ad, film, exit } = setup()
+      film.requestPictureInPicture = vi.fn(() => Promise.reject(new DOMException('refused', 'NotAllowedError')))
+      const done = h.session.playBreak(TAG, { position: 'midroll' })
+      await h.settle()
+      expect(document.pictureInPictureElement).toBe(ad)
+
+      const closeWindow = exit.getMockImplementation()!
+      exit.mockImplementation(async () => {
+        expect(h.ad.source, 'closed before the ad is unloaded').toBe(mediaUrl('a1'))
+        await closeWindow()
+      })
+      await h.finishAd()
+      expect((await done).outcome.type).toBe('completed')
+      expect(exit).toHaveBeenCalledOnce()
+      expect(document.pictureInPictureElement).toBeNull()
+      expect(ad.hasAttribute('disablepictureinpicture')).toBe(true)
+      expect(h.content!.calls).toEqual(['pause', 'resume'])
+    })
+
+    it('does not wait forever on a film that never takes the window back', async () => {
+      useFakeTimers()
+      const { h, ad, film, open } = setup()
+      let answer!: () => void
+      film.requestPictureInPicture = vi.fn(() => new Promise<PictureInPictureWindow>((resolve) => {
+        answer = () => {
+          open(film)
+          resolve({} as PictureInPictureWindow)
+        }
+      }))
+      const done = h.session.playBreak(TAG, { position: 'midroll' })
+      await h.settle()
+      await h.finishAd()
+      vi.advanceTimersByTime(3000)
+      await h.settle()
+      expect((await done).outcome.type).toBe('completed')
+      expect(h.content!.calls).toEqual(['pause', 'resume'])
+      expect(ad.hasAttribute('disablepictureinpicture'), 'not under a request still in flight').toBe(false)
+
+      answer()
+      await h.settle()
+      expect(document.pictureInPictureElement).toBe(film)
+      expect(ad.hasAttribute('disablepictureinpicture')).toBe(true)
+    })
+  })
+
   describe('pausing', () => {
     it('session.pause() and resume() are reported as pause and resume', async () => {
       const h = harness({ documents: { [TAG]: inLine('a1') } })
@@ -1352,13 +1652,17 @@ describe('VastAdSession', () => {
       const mediaSession = new FakeMediaSession()
       const film = { title: 'The Film' }
       mediaSession.metadata = film
+      const nextEpisode = vi.fn()
+      mediaSession.setActionHandler('nexttrack', nextEpisode)
       const h = harness({ documents: { [TAG]: inLine({ id: 'a1', title: 'Brand Spot' }) }, mediaSession })
       const { done } = await startPreroll(h)
       h.play(0, 3)
 
       expect(mediaSession.metadata).toMatchObject({ title: 'Brand Spot' })
       for (const action of ['seekbackward', 'seekforward', 'seekto', 'previoustrack', 'nexttrack', 'skipad']) {
-        expect(typeof mediaSession.handlers.get(action), `${action} is switched off, not left to the content`).toBe('function')
+        // No handler rather than one that does nothing: Chrome draws a button
+        // in its PiP window for every action that has one.
+        expect(mediaSession.handlers.get(action), `${action} is switched off, not left to the content`).toBeNull()
       }
 
       // A headset's pause and play are the viewer's own choice.
@@ -1376,6 +1680,43 @@ describe('VastAdSession', () => {
 
       expect(mediaSession.metadata).toBe(film)
       expect([...mediaSession.handlers.values()].every((handler) => handler === null)).toBe(true)
+    })
+
+    it('offers skipad only once the skip control is due, and it skips', async () => {
+      const mediaSession = new FakeMediaSession()
+      const h = harness({
+        documents: { [TAG]: response({ id: 's1', sequence: 1, skipOffset: '00:00:05' }, { id: 'n2', sequence: 2 }) },
+        mediaSession,
+      })
+      const { done } = await startPreroll(h)
+      h.play(0, 4)
+      expect(mediaSession.handlers.get('skipad'), 'no Skip Ad button before skipoffset').toBeNull()
+
+      h.play(4, 5)
+      expect(typeof mediaSession.handlers.get('skipad')).toBe('function')
+      mediaSession.invoke('skipad')
+      expect(mediaSession.handlers.get('skipad'), "Safari's Ad badge and skip button go with the ad").toBeNull()
+      await h.settle()
+      expect(h.reported).toContain('skip')
+      expect(h.events).toContain('finished s1 skipped')
+
+      // The next ad has no skip control, so the button goes with the one that had.
+      expect(h.events).toContain('started n2 2/2')
+      expect(mediaSession.handlers.get('skipad'), 'not carried over to a non-skippable ad').toBeNull()
+      await h.finishAd()
+      await done
+    })
+
+    it('ignores a late skipad that reaches an ad which cannot be skipped', async () => {
+      const mediaSession = new FakeMediaSession()
+      const h = harness({ documents: { [TAG]: inLine({ id: 's1', skipOffset: '00:00:05' }) }, mediaSession })
+      await startPreroll(h)
+      h.play(0, 6)
+      const skipad = mediaSession.handlers.get('skipad')!
+      h.session.skip()
+      await h.settle()
+      expect(() => skipad()).not.toThrow()
+      expect(h.reported.filter((label) => label === 'skip')).toHaveLength(1)
     })
 
     it('names an ad with no <AdTitle> by the page-language fallback', async () => {

@@ -1,15 +1,26 @@
+import { lendVideoForPictureInPicture, type VastSameElementOptions } from './VastLentVideo.js'
+import { isInPictureInPicture } from './VastPictureInPicture.js'
+
 /**
  * The host's player, as the break needs it: something to stop before the ad
  * and to start again after it.
  *
- * The ad never plays in the content's own element. Kinodaran's content is
- * DRM-protected HLS and DASH behind Video.js; swapping an ad into that element
- * would tear down the media keys and the adaptive stream and build them again
- * afterwards, which is exactly the fragile part of an IMA integration. The ad
- * plays in an element of the session's own over the content, and the content
- * only has to pause.
+ * The session normally plays the ad over the content in its own element, so
+ * pausing a DRM-protected or adaptive stream preserves its keys and buffer.
+ * While the content is in a PiP window, an adapter can lend its element
+ * instead, so the ad appears in that window and the film comes back to it.
  */
 export interface VastContentPlayer {
+  /** The content element for handing off an already open Picture-in-Picture window. */
+  readonly videoElement?: HTMLVideoElement | null
+
+  /**
+   * Lend the content's element for a mid-roll while the content is in a PiP
+   * window, or `null` to have the ad take the window over from its own
+   * element. See {@link lendVideoForPictureInPicture}.
+   */
+  borrowVideoForPiP?(): VastBorrowedVideo | null
+
   /**
    * The break is starting: pause, and take away whatever would let the viewer
    * reach the content's timeline — controls, hotkeys, a big play button.
@@ -29,6 +40,20 @@ export interface VastContentPlayer {
   readonly currentTime?: number
 }
 
+export interface VastBorrowedVideo {
+  readonly video: HTMLVideoElement
+  /** Restore the content source and position, leaving playback to resumeAfterBreak. */
+  restore(): Promise<void>
+  /**
+   * Stop the lending player hearing the element's media events — the ad's,
+   * and the film's while it is put back — until the returned function is
+   * called. Only the player: the browser's own controls listen to the same
+   * element (Safari's PiP window keeps its timeline from these events), so
+   * the events themselves must still reach everyone else.
+   */
+  hush?(): () => void
+}
+
 /**
  * The content player for a plain `<video>` element: pauses it, hides its native
  * controls for the break, and puts both back.
@@ -37,9 +62,27 @@ export interface VastContentPlayer {
  * not from a default: a host that had hidden the controls itself gets them back
  * hidden.
  */
-export function htmlVideoContent(video: HTMLVideoElement): VastContentPlayer {
+export function htmlVideoContent(video: HTMLVideoElement, options: VastSameElementOptions = {}): VastContentPlayer {
   let saved: { controls: boolean; wasPlaying: boolean; time: number } | null = null
+  let lent = false
   return {
+    videoElement: video,
+    borrowVideoForPiP() {
+      if (lent) return null
+      const borrowed = lendVideoForPictureInPicture(video, saved?.time ?? video.currentTime, options)
+      if (!borrowed) return null
+      lent = true
+      return {
+        video: borrowed.video,
+        async restore() {
+          try {
+            await borrowed.restore()
+          } finally {
+            lent = false
+          }
+        },
+      }
+    },
     pauseForBreak() {
       if (saved) return
       saved = { controls: video.controls, wasPlaying: !video.paused || video.autoplay, time: video.currentTime }
@@ -81,6 +124,8 @@ interface WebKitVideo {
  */
 export function exitNativeFullscreen(video: HTMLVideoElement): void {
   const webkit = video as HTMLVideoElement & WebKitVideo
+  // WebKit also reports native Picture-in-Picture as displaying fullscreen.
+  if (isInPictureInPicture(video)) return
   if (webkit.webkitDisplayingFullscreen && typeof webkit.webkitExitFullscreen === 'function') {
     try {
       webkit.webkitExitFullscreen()

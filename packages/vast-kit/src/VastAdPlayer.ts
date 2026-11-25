@@ -1,5 +1,6 @@
 import { VastError } from '@kinodaran/vast-core'
 import type { MediaPlayerClass } from 'dashjs'
+import { setSourceQuietly } from './VastLentVideo.js'
 import { VastLog } from './VastLog.js'
 import { DASH_MIME } from './VastWebVideoFormats.js'
 
@@ -39,10 +40,9 @@ export type VastStartResult = 'started' | 'mutedByPolicy' | 'refused' | 'interru
  * unlocked again, and there is no gesture to unlock it with in the middle of a
  * film. {@link prepare} is that unlock.
  *
- * The element is never given controls, Picture in Picture or remote playback:
- * every one of them is a way to scrub, background or cast an ad out from under
- * its tracking, and the session draws what the viewer is owed — skip, click,
- * unmute — itself.
+ * The session draws skip, click and unmute controls over the video. Native
+ * controls and remote playback are disabled. Picture-in-Picture is available
+ * during a handoff from content already playing in Picture-in-Picture.
  *
  * Nor does it take a seek or a speed it did not ask for. With no controls no
  * viewer can reach either, but devtools, a browser extension or a "skip ads"
@@ -55,7 +55,10 @@ export type VastStartResult = 'started' | 'mutedByPolicy' | 'refused' | 'interru
 export class VastAdPlayer {
   /** Absolutely positioned over the host's player; the overlay mounts here, above the video. */
   readonly layer: HTMLDivElement
-  readonly video: HTMLVideoElement
+  private readonly ownedVideo: HTMLVideoElement
+  private borrowedVideo: HTMLVideoElement | null = null
+  /** Lets the lender's player hear its element again. */
+  private returnMediaEvents: (() => void) | null = null
 
   private listener: VastAdPlayerListener | null = null
   private dashPlayer: MediaPlayerClass | null = null
@@ -114,7 +117,7 @@ export class VastAdPlayer {
       objectFit: 'contain',
       background: '#000',
     } satisfies Partial<CSSStyleDeclaration>)
-    this.video = video
+    this.ownedVideo = video
     this.layer.appendChild(video)
 
     if (doc.defaultView?.getComputedStyle(container).position === 'static') {
@@ -123,6 +126,36 @@ export class VastAdPlayer {
       container.style.position = 'relative'
     }
     container.appendChild(this.layer)
+    this.observe()
+  }
+
+  get video(): HTMLVideoElement {
+    return this.borrowedVideo ?? this.ownedVideo
+  }
+
+  /**
+   * Plays the break in an element lent by the host's player. `hush` keeps
+   * the element's media events from that player while it is lent: they are
+   * the ad's — see `VastBorrowedVideo.hush`.
+   */
+  useBorrowedVideo(video: HTMLVideoElement, hush?: () => () => void): void {
+    this.stopObserving()
+    this.borrowedVideo = video
+    this.ownedVideo.style.display = 'none'
+    this.layer.style.background = 'transparent'
+    this.observe()
+    this.returnMediaEvents = hush?.() ?? null
+  }
+
+  releaseBorrowedVideo(): void {
+    if (!this.borrowedVideo) return
+    this.unload()
+    this.returnMediaEvents?.()
+    this.returnMediaEvents = null
+    this.stopObserving()
+    this.borrowedVideo = null
+    this.ownedVideo.style.display = ''
+    this.layer.style.background = '#000'
     this.observe()
   }
 
@@ -162,6 +195,9 @@ export class VastAdPlayer {
     this.video.volume = clamp(sound.volume)
     if (mimeType?.toLowerCase() === DASH_MIME) {
       if (!await this.attachDash(url, listener) || this.listener !== listener) return 'interrupted'
+    } else if (this.borrowedVideo) {
+      // Quietly: the player that lent the element must not take the ad for its own source.
+      setSourceQuietly(this.video, url)
     } else {
       this.video.src = url
       this.video.load()
@@ -276,6 +312,7 @@ export class VastAdPlayer {
     this.reachedTime = 0
     this.restoring = false
     this.video.pause()
+    if (this.borrowedVideo) return
     this.video.removeAttribute('src')
     try {
       this.video.load()
@@ -286,14 +323,21 @@ export class VastAdPlayer {
 
   destroy(): void {
     this.unload()
-    for (const dispose of this.disposers.splice(0)) dispose()
+    this.returnMediaEvents?.()
+    this.returnMediaEvents = null
+    this.stopObserving()
     this.layer.remove()
   }
 
+  private stopObserving(): void {
+    for (const dispose of this.disposers.splice(0)) dispose()
+  }
+
   private observe(): void {
+    const video = this.video
     const on = (name: string, handler: () => void): void => {
-      this.video.addEventListener(name, handler)
-      this.disposers.push(() => this.video.removeEventListener(name, handler))
+      video.addEventListener(name, handler)
+      this.disposers.push(() => video.removeEventListener(name, handler))
     }
     const current = (): VastAdPlayerListener | null => (this.source ? this.listener : null)
 

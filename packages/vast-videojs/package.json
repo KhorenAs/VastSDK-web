@@ -25,5 +25,8 @@
   "dependencies": {
     "@kinodaran/vast-core": "0.1.0",
     "@kinodaran/vast-kit": "0.1.0"
+  },
+  "devDependencies": {
+    "video.js": "^8.24.2"
   }
 }

@@ -13,7 +13,8 @@ or cannot do something they can — this README says so.
 4.3 is what it implements; 2.0, 3.0 and every 4.x **parse through the same
 version-tolerant path**, because real ad servers still send them. An element the
 SDK does not know is skipped rather than rejected; the only document it refuses
-outright is a pre-3.0 one, which gets VAST error 102.
+outright is one whose root is not `<VAST>` — VAST 1.0's
+`<VideoAdServingTemplate>` — which gets VAST error 102.
 
 ## Packages
 
@@ -60,13 +61,72 @@ That is the whole integration for a pre-roll. The break plays over `player.el()`
 session's own. The film is **paused, never unloaded**: VHS keeps its buffer, EME
 keeps its keys, and the content resumes from the frame it stopped on with no new
 licence request. That is the difference from an IMA integration, which swaps the
-ad into the content element and has to rebuild the DRM stream afterwards.
+ad into the content element and has to rebuild the DRM stream afterwards. The
+one exception is a film in a PiP window in Safari — see
+[Picture-in-Picture](#picture-in-picture).
 
 For the length of the break the adapter takes the control bar away, undoes any
 `play` on the content (a hotkey, the host's own code), and restores everything
 afterwards from what it saved rather than from defaults. Every tap, click or key
 on the player calls `session.prepare()`, which is what lets iOS Safari start the
 ad with sound — the job IMA gives `initializeAdDisplayContainer()`.
+
+### Picture-in-Picture
+
+When the film is playing in a PiP window and a mid-roll starts, the ad appears in
+that window, and the film is back in it when the break ends — whether the ad
+played out or was skipped. A viewer who closes the window during the break finds
+it still closed afterwards.
+
+How depends on the browser. Chrome moves an open window from one element to
+another in place, so the ad takes the window over from its own element and hands
+it back. **Safari cannot**: it has one element in PiP at a time, and moving the
+window between two elements closes it — animated back into the page — and opens
+a new one. So in Safari, and every WebKit browser, the mid-roll plays in the
+film's own element and the window never moves:
+
+- The film's source is set back when the break ends and it loads again, so it
+  buffers for a moment before it plays on. Its position, loop, speed and volume
+  come back as they were.
+- Video.js hears none of it. The sources are set past its `src` wrapper, so
+  `player.currentSource()` stays the film's — with its `keySystems` — and the
+  element's media events, the ad's and the film's reload alike, are kept from
+  Video.js and so from every `player.on`: the ad's `ended` is not the film's,
+  its `timeupdate` is not film watched, and no `loadstart` puts the poster
+  back. Only from Video.js: the events still reach the element's other
+  listeners, the browser's among them — Safari's PiP window takes its
+  timeline from them. A host listening to the element directly, rather than
+  through Video.js, hears the ad; so does any host of `htmlVideoContent`.
+- It needs a film the element plays from a URL: a progressive file, or Safari's
+  own HLS (Video.js's default there). A film behind a `MediaSource` cannot be
+  given back to its element, so the ad uses its own element and Safari's window
+  makes its jump. A DASH creative is the same, and plays in the ad's own element.
+- DRM-protected content is lent only with `sameElementPiPForProtectedContent:
+  true`: the licence is requested again for the film when it comes back,
+  through whatever answered the first request. Check that against your licence
+  server before turning it on; until then, protected films in Safari's PiP make
+  the jump.
+
+`sameElementPiP` chooses: `'webkit'` (the default) as above, `true` for the
+film's element wherever it can be lent, `false` for never. Both options go to
+`createVastVideojs`, or to `htmlVideoContent` without Video.js.
+
+Every PiP step is logged (`[VastSDK] PiP: …`) with what the browser reports —
+the place to look when a browser does something else with the window.
+
+A mid-roll asked for while the page is hidden does not stop the film until its
+ad can be seen: the break waits, with the film playing on, until the page is
+shown again or the film opens a PiP window the ad can take over. Firefox's PiP
+has no API to take over, so there the break waits for the page. A pre-roll still
+starts — the film is waiting for it — and is held until the page is back.
+
+The skip control is on the page, where a PiP window cannot show it, so the
+browser draws one in the window once the skip comes due: the session gives
+`skipad` in the Media Session API a handler then, and takes it away when the
+ad ends. Chrome shows a "Skip Ad" button; Safari puts its window in ad mode —
+an "Ad" badge, a yellow timeline and a skip button. Both skip, through
+`session.skip()`. Before the skip is due there is nothing to press: a seek
+from the window's own controls is put back like any other.
 
 `playBreak` never rejects. It settles when the break is over, however it went:
 
@@ -110,8 +170,9 @@ playButton.addEventListener('click', () => session.prepare())
 ```
 
 `content` is any `VastContentPlayer` — two methods, `pauseForBreak()` and
-`resumeAfterBreak()`. Leave it out and the host pauses and resumes its own player
-around `playBreak`.
+`resumeAfterBreak()`; the optional `videoElement` and `borrowVideoForPiP()` are
+what Picture-in-Picture needs. Leave it out and the host pauses and resumes its
+own player around `playBreak`.
 
 ### Breaks on demand
 
@@ -127,7 +188,7 @@ turns out empty.
 
 ## Replacing IMA on kinodaran.com
 
-kinodaran.com today runs Video.js 7 with VHS and contrib-eme (Widevine and
+kinodaran.com today runs Video.js 8 with VHS and contrib-eme (Widevine and
 FairPlay), and plays ads through the `videojs-ima` plugin from its own ad
 controller. The controller's scheduling stays as it is — the backend's
 `preroll`/`midroll`/`endroll` config, `max_count`, `ad_frequency` and the
@@ -144,7 +205,7 @@ into IMA change:
 | `adsManager.stop()` (the skip button) | `session.skip()` |
 | `AdsRenderingSettings.bitrate = 6506` | nothing — the session picks the rendition for the player's size |
 | `player.currentTime(lastTime)` after the break | nothing — the adapter restores it |
-| `ima3.js` `<script>` tag | removed |
+| loading `ima3.js` before the player starts | removed |
 
 Kinodaran's React overlay — the skip button with its countdown and the "ad 1 of
 3" counter — can stay. React reads the session directly:
@@ -158,6 +219,11 @@ const snapshot = useSyncExternalStore(vast.session.subscribe, vast.session.getSn
 With `skipPresentation: 'host'` the SDK leaves the skip control to that button;
 without it, drop `overlay: false` and the SDK's own overlay draws everything, in
 Armenian on an Armenian page.
+
+kinodaran.com sets `vhs.overrideNative: true` for Safari, so the film plays
+through a `MediaSource` there: in Safari's PiP window the ad takes the window
+over from its own element, with the jump described under
+[Picture-in-Picture](#picture-in-picture), rather than playing in the film's.
 
 Two things to confirm on the live site before switching: that Kinodaran's own ad
 server answers credentialed CORS requests (the loader retries without cookies if
@@ -179,8 +245,9 @@ It draws in the session's layer, above the ad's video and inside the player, so
 it follows the player into fullscreen and cannot end up under the host's skin.
 Every element has a stable class (`vast-badge`, `vast-skip`, `vast-learn-more`,
 `vast-unmute`, `vast-click`) and the look comes from CSS custom properties
-(`--vast-fg`, `--vast-chip-bg`, `--vast-skip-bg`, `--vast-skip-bottom`,
-`--vast-inset`, `--vast-focus`, `--vast-font`), so the host owns the style while
+(`--vast-fg`, `--vast-chip-bg`, `--vast-skip-bg`, `--vast-skip-ready-bg`,
+`--vast-skip-border`, `--vast-skip-bottom`, `--vast-inset`, `--vast-focus`,
+`--vast-font`), so the host owns the style while
 the SDK owns the behaviour. Strings ship in English and Armenian, the same as the
 Apple SDK's.
 
@@ -197,25 +264,31 @@ key cannot take the §2.3 promise away from a host that never agreed to keep it.
 
 ## What the session holds the line on
 
-- **No seeking, no speed-up.** The ad element has no controls, Picture in
-  Picture or remote playback, and the content's control bar is gone for the
-  break. `permitsPlaybackControls` in the snapshot is `false` throughout — and in
-  the gap between two queued breaks. What no viewer can reach, devtools or a
+- **No seeking, no speed-up.** The ad element has no controls or remote
+  playback, Picture in Picture only to take over a window the film already has
+  open, and the content's control bar is gone for the break.
+  `permitsPlaybackControls` in the snapshot is `false` throughout — and in the
+  gap between two queued breaks. What no viewer can reach, devtools or a
   "skip ads" extension still can, so a seek the session did not make is put
   back where playback had reached and a playback rate goes back to 1× — the
   web's version of Media3 refusing seeks during an ad. A seek on the hidden film
   is undone when the break ends.
 - **Nothing unwatched.** A hidden tab keeps decoding video with sound, so the
   session holds the ad while the page is hidden and resumes it when it is back —
-  not reported as a pause, because nobody paused. Clicking through to the
-  advertiser opens a tab, which hides the page, which holds the ad.
+  not reported as a pause, because nobody paused. An ad in a PiP window is seen,
+  and plays on. A mid-roll asked for on a hidden page waits to start until it
+  can be seen. Clicking through to the advertiser opens a tab, which hides the
+  page, which holds the ad.
 - **Autoplay.** Where the browser refuses sound, the ad starts muted and the
   overlay offers to unmute. A muted start is not a §3.14.1 `mute` — the viewer
   chose nothing — and unmuting is reported as `unmute`. Where it refuses even
   muted playback, the ad fails with 405 and the content plays.
 - **The system's media controls.** Media keys, a headset, the lock screen and the
-  OS media hub name the ad while it plays, and cannot seek or skip past it
-  (`mediaSession: 'describesAd'`, the default).
+  OS media hub name the ad while it plays, and cannot seek past it
+  (`mediaSession: 'describesAd'`, the default). The actions that would get past
+  it have no handler rather than one that does nothing, because Chrome draws a
+  button for every action with a handler. `skipad` gets the real skip once the
+  ad's skip control is due.
 - **iPhone fullscreen.** iPhone Safari plays `<video>` fullscreen in a layer the
   page cannot draw over, so a break leaves it first — as IMA does on iOS.
 

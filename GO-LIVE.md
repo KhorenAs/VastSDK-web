@@ -5,12 +5,15 @@ what blocks the road rather than by effort. Items that close are struck through
 with the commit that closed them — a list that only grows is a list nobody reads
 twice.
 
-State: `npm test` passes 402 tests — 177 in `vast-core`, every core suite of
+State: `npm test` passes 428 tests — 177 in `vast-core`, every core suite of
 VastSDK-apple and VastSDK-android ported against the same fixtures plus the
-web's own macros and parser repair; 207 in `vast-kit`, whole breaks driven
-through a scripted ad element under jsdom, the overlay, and the guard that puts
-back a seek or a speed nobody in the session asked for; and 18 in
-`vast-videojs`, against a fake Video.js player. Writing those found six defects —
+web's own macros and parser repair; 227 in `vast-kit`, whole breaks driven
+through a scripted ad element under jsdom, the overlay, the guard that puts
+back a seek or a speed nobody in the session asked for, and Picture-in-Picture
+(the window handed over and back, the film's element lent, WebKit's emptied
+`pictureInPictureElement`, a slow or refused handoff); and 24 in
+`vast-videojs`, against a fake Video.js player and — where what is relied on is
+Video.js's own event dispatcher — the real Video.js 8. Writing those found six defects —
 four of them shared with the Android SDK (a stall reported as 402 but ended as
 405, a stall with no `<Error>` URI going unannounced, a failed creative's hold
 leaking into the next, a beacon that keeps failing never ageing out) — and all
@@ -19,7 +22,10 @@ six are fixed here.
 Chromium-based browser against Google's public IMA sample tags: the tag resolved
 over CORS, the creative played, every beacon reached Google's tracking hosts,
 skip and a three-break series behaved, and the film resumed once, where it
-stopped.
+stopped. Desktop Safari 27 has run the demo's pre-roll and mid-rolls with the
+film in a PiP window: the ads played in the film's element, the window never
+moved, and the film came back to it after a skip and after a played-out ad,
+two breaks in a row.
 
 ## Blockers
 
@@ -34,14 +40,20 @@ the owner's step. Until then `npm pack` makes installable tarballs.
 
 **3. Real browsers and devices.** jsdom answers the logic; it does not answer
 autoplay policy, iOS Safari's gesture rules, iPhone native fullscreen, or how a
-TV remote's keys arrive. Safari on iPhone and iPad, Chrome on Android, Firefox,
-desktop Safari and Chrome, and — if Kinodaran ships TV web apps — Tizen and webOS.
+TV remote's keys arrive. Desktop Chrome and Safari have run the demo (above).
+Still to run: Safari on iPhone and iPad, Chrome on Android, Firefox — including
+a mid-roll asked for while its PiP window plays on a hidden tab — and, if
+Kinodaran ships TV web apps, Tizen and webOS.
 
 **4. kinodaran.com itself.** Replace the IMA calls in the player's ad controller
 (README, "Replacing IMA on kinodaran.com") on a branch of the site, and confirm
 two things about Kinodaran's own ad server that only the live site can answer:
 that it answers credentialed CORS requests for the VAST tag, and that every
-tracking URL it emits is https.
+tracking URL it emits is https. Two decisions come with it for Safari's PiP
+window (item 9a): the site's `vhs.overrideNative: true` keeps the film behind
+a `MediaSource` there, and lending a DRM-protected film
+(`sameElementPiPForProtectedContent`) needs a check against the licence server
+first.
 
 ## Blockers only for programmatic demand
 
@@ -84,9 +96,29 @@ shows "ad 2 of 3" across the series. Each queued break reports its own position;
 the host counts the series. A `playBreak` option that numbers a series as one
 break would let the SDK's overlay show it too.
 
-**9. Picture in Picture.** The ad element refuses it; content already in a
-Picture in Picture window when a break starts is paused there while the ad plays
-in the page. The Apple and Android SDKs have a policy for this; the web has none
-yet.
+**9. ~~Picture in Picture.~~** A break that starts with the film in a PiP window
+plays in that window and gives it back (README, "Picture-in-Picture"). Chrome
+hands the window to the ad's element and back; Safari, which cannot move a
+window between two elements, plays the mid-roll in the film's own element,
+with Video.js kept from hearing it. A mid-roll on a hidden page waits until its
+ad can be seen, and the browser's own skip button comes from `skipad` once the
+skip is due.
+
+**9a. PiP where the film's element cannot be lent.** In Safari, a film behind a
+`MediaSource` (kinodaran.com's `vhs.overrideNative: true`), or DRM-protected
+without the opt-in, falls back to handing the window over between elements: the
+window animates back into the page and out again, and WebKit — which empties
+`pictureInPictureElement` when the old element's exit lands late — refuses the
+next handoff without a user gesture, so the second mid-roll of one PiP session
+plays on the page. Lending a `MediaSource` film would mean loading it again
+through Video.js (`player.src()`), as IMA does. Firefox's PiP has no API, so a
+mid-roll there waits for the page. Safari's PiP window also keeps its skip-10s
+buttons during an ad — WebKit gives pages nothing like AVKit's
+`requiresLinearPlayback` — and the seeks they make are put back.
 
 **10. The AdChoices icon is parsed but not drawn.** As on Apple and Android.
+
+**11. Video.js 8's own TypeScript types.** `VideoJsPlayerLike` declares
+`currentTime()` and `volume()` as returning `number`; Video.js 8's types return
+`number | undefined`, so a TypeScript host passes a real player only through a
+cast. JavaScript hosts, kinodaran.com among them, are not affected.

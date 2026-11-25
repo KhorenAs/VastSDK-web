@@ -2,9 +2,12 @@ import {
   VastAdOverlay,
   VastAdSession,
   exitNativeFullscreen,
+  lendVideoForPictureInPicture,
   type VastAdOverlayOptions,
+  type VastBorrowedVideo,
   type VastConfiguration,
   type VastContentPlayer,
+  type VastSameElementOptions,
 } from '@kinodaran/vast-kit'
 
 /**
@@ -39,10 +42,12 @@ export const VAST_BREAK_CLASS = 'vast-ad-playing'
  * The content player for Video.js: pauses the film, takes the controls away
  * for the break, and gives everything back where the viewer left it.
  *
- * The film is only ever paused — never unloaded — so VHS keeps its buffer and
- * EME keeps its keys, and the content resumes from the frame it stopped on
- * without a new licence request. That is the whole reason the ad plays in an
- * element of its own.
+ * The film is paused in its own element, so VHS keeps its buffer and EME its
+ * keys. The exception is a film in a PiP window in Safari, where the window
+ * can only stay open around the element it belongs to: there the film's own
+ * element plays the mid-roll, Video.js hears none of it — not the ad, not the
+ * film being loaded again — and the film comes back to the window. See
+ * `VastSameElementOptions`.
  *
  * - The control bar goes (`controls(false)`): an ad the viewer can scrub is an
  *   ad the viewer can get past, and the content's timeline is under the ad.
@@ -53,16 +58,38 @@ export const VAST_BREAK_CLASS = 'vast-ad-playing'
  *   saved, not from a default: a host that had hidden the controls itself gets
  *   them back hidden.
  */
-export function videojsContent(player: VideoJsPlayerLike): VastContentPlayer {
+export function videojsContent(player: VideoJsPlayerLike, options: VastSameElementOptions = {}): VastContentPlayer {
   let saved: { controls: boolean; wasPlaying: boolean; time: number } | null = null
+  let lent = false
+  const contentVideo = (): HTMLVideoElement | null => player.el().querySelector('video:not(.vast-ad-video)')
   const holdContent = (): void => {
-    if (saved) player.pause()
+    if (saved && !lent) player.pause()
   }
 
   return {
+    get videoElement() {
+      return contentVideo()
+    },
+    borrowVideoForPiP(): VastBorrowedVideo | null {
+      if (lent) return null
+      const borrowed = lendVideoForPictureInPicture(contentVideo(), saved?.time ?? player.currentTime(), options)
+      if (!borrowed) return null
+      lent = true
+      return {
+        video: borrowed.video,
+        async restore() {
+          try {
+            await borrowed.restore()
+          } finally {
+            lent = false
+          }
+        },
+        hush: () => hushVideojs(borrowed.video),
+      }
+    },
     pauseForBreak() {
       if (saved) return
-      const video = player.el().querySelector('video')
+      const video = contentVideo()
       if (video) exitNativeFullscreen(video)
       saved = {
         controls: player.controls(),
@@ -104,7 +131,42 @@ export function videojsContent(player: VideoJsPlayerLike): VastContentPlayer {
   }
 }
 
-export interface VastVideojsOptions {
+/** The element events Video.js's HTML5 tech passes on to the player (`Html5.Events`). */
+const VIDEOJS_MEDIA_EVENTS = [
+  'loadstart', 'suspend', 'abort', 'error', 'emptied', 'stalled', 'loadedmetadata', 'loadeddata',
+  'canplay', 'canplaythrough', 'playing', 'waiting', 'seeking', 'seeked', 'ended', 'durationchange',
+  'timeupdate', 'progress', 'play', 'pause', 'ratechange', 'resize', 'volumechange',
+] as const
+
+/**
+ * Makes Video.js deaf to its element's media events, and nothing else.
+ *
+ * While the element is lent its events are the ad's: passed on, the ad's
+ * `ended` would be the film's, its `timeupdate` film watched, and a
+ * `loadstart` would put the poster back. Stopping the events outright would
+ * silence the browser too — Safari's PiP window keeps its timeline, play
+ * state and duration from listeners on this same element, and showed the
+ * film's frozen time over the ad. So each event is marked the way Video.js
+ * marks an event whose handlers are to be skipped (`fixed_`, and
+ * `isImmediatePropagationStopped()` true): Video.js's dispatcher — and with
+ * it every `player.on` — passes over it, and every other listener hears it.
+ */
+function hushVideojs(video: HTMLVideoElement): () => void {
+  const hush = (event: Event): void => {
+    Object.assign(event, {
+      fixed_: true,
+      isPropagationStopped: () => true,
+      isImmediatePropagationStopped: () => true,
+    })
+  }
+  for (const name of VIDEOJS_MEDIA_EVENTS) video.addEventListener(name, hush, true)
+  return () => {
+    for (const name of VIDEOJS_MEDIA_EVENTS) video.removeEventListener(name, hush, true)
+  }
+}
+
+/** `sameElementPiP` and `sameElementPiPForProtectedContent`: see `VastSameElementOptions`. */
+export interface VastVideojsOptions extends VastSameElementOptions {
   readonly configuration?: Partial<VastConfiguration>
   /** `false` for a host drawing its own ad UI (then set `skipPresentation: 'host'`). Default: the SDK's overlay. */
   readonly overlay?: boolean | VastAdOverlayOptions
@@ -135,7 +197,10 @@ export function createVastVideojs(player: VideoJsPlayerLike, options: VastVideoj
   const container = player.el() as HTMLElement
   const session = new VastAdSession({
     container,
-    content: videojsContent(player),
+    content: videojsContent(player, {
+      sameElementPiP: options.sameElementPiP,
+      sameElementPiPForProtectedContent: options.sameElementPiPForProtectedContent,
+    }),
     configuration: options.configuration,
   })
   const overlay =

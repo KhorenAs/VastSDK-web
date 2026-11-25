@@ -42,11 +42,12 @@ import {
   type VastSkipPresentation,
 } from './VastAdSessionTypes.js'
 import type { VastBeaconTransport } from './VastBeaconTransport.js'
-import type { VastContentPlayer } from './VastContentPlayer.js'
+import type { VastBorrowedVideo, VastContentPlayer } from './VastContentPlayer.js'
 import { VastFetchLoader, VastFetchTransport } from './VastHttp.js'
 import { VastLog } from './VastLog.js'
 import type { VastMeasurement, VastMeasurementEvent } from './VastMeasurement.js'
 import { VastMediaSessionLock } from './VastMediaSessionLock.js'
+import { VastPictureInPicture, isInPictureInPicture } from './VastPictureInPicture.js'
 import { vastStringsFor } from './VastStrings.js'
 import { DASH_MIME, HLS_MIMES, preferredWebVideoFormat, supportsDashPlayback } from './VastWebVideoFormats.js'
 import { VastVideoClock } from './VastVideoClock.js'
@@ -212,12 +213,18 @@ export class VastAdSession {
   private readonly skipControlHosts = new Set<() => { width: number; height: number } | null>()
   private reportedSkipControlProblem = false
   private readonly stopObservingVisibility: () => void
+  private readonly pictureInPicture: VastPictureInPicture
+  private borrowedVideo: VastBorrowedVideo | null = null
+  private restoringBorrowedVideo: Promise<void> | null = null
+  /** Set while a break waits for the page or a PiP window to show its ad in. */
+  private visibilityWaiter: (() => void) | null = null
 
   constructor(options: VastAdSessionOptions) {
     this.configuration = { ...DEFAULT_CONFIGURATION, ...options.configuration }
     this.environment = { ...defaultEnvironment(this.configuration), ...options.environment }
     this.content = options.content ?? null
     this.adPlayer = new VastAdPlayer(options.container)
+    this.pictureInPicture = new VastPictureInPicture(this.adPlayer.video)
     this.resolver = new VastTagResolver(
       this.environment.loader,
       this.configuration.maxWrapperDepth,
@@ -227,15 +234,13 @@ export class VastAdSession {
     this.snapshot = this.makeSnapshot()
 
     /**
-     * An ad nobody can see must not go on playing. A background tab keeps
-     * decoding video with sound, so a break left running behind another tab
-     * would earn quartiles from a viewer who was not there. The session holds
-     * the ad instead: not a §3.14.1 `pause`, because nobody paused, and resumed
-     * on its own when the page comes back.
+     * Hold the ad when neither the page nor the ad's PiP window is visible.
+     * A visibility hold resumes automatically and does not report a viewer pause.
      */
-    this.stopObservingVisibility = this.environment.onVisibilityChange(() =>
-      this.notePageVisible(this.environment.isPageVisible()),
-    )
+    this.stopObservingVisibility = this.environment.onVisibilityChange(this.updateAdVisibility)
+    const doc = options.container.ownerDocument
+    doc.addEventListener('enterpictureinpicture', this.updateAdVisibility, true)
+    doc.addEventListener('leavepictureinpicture', this.updateAdVisibility, true)
 
     // Whatever an earlier page left in the retry queue goes out now, while the
     // network is evidently up.
@@ -284,6 +289,9 @@ export class VastAdSession {
    * content is waiting for it. Any other break leaves the content playing while
    * its response comes back, and stops it only once there is an ad to show:
    * nothing should look as though it stopped for a break that turns out empty.
+   * Nor for one nobody can see: on a hidden page, such a break waits — the
+   * content playing on — until the page is shown again or the ad can take
+   * over the PiP window the content has open.
    *
    * Never rejects. The promise settles when the break is over, however it went.
    */
@@ -309,7 +317,7 @@ export class VastAdSession {
         } catch (error) {
           VastLog.warning(`break ended unexpectedly: ${String(error)}`)
           result = { outcome: { type: 'failed', error: VastError.UNDEFINED }, adsStarted: 0 }
-          this.endBreak(true)
+          await this.endBreak(true)
         }
         request.resolve(result)
       }
@@ -359,12 +367,36 @@ export class VastAdSession {
       return this.failBreak(this.lastOutcomeError(), blocking, false)
     }
 
+    // A break asked for while the content plays stops it only once the ad can
+    // be seen: on the page, or in the PiP window the content has open. Stopped
+    // for an ad on a hidden page, a film playing in a window the ad cannot
+    // reach — Firefox's PiP, which has no API to reach it with — would freeze
+    // there: the ad waits for the page, and the content refuses to play under it.
+    if (!blocking && !this.adCanBeSeen()) {
+      await this.adBecomesVisible()
+      if (this.destroyed) return this.cancelled()
+    }
+    const film = this.content?.videoElement ?? null
+    const filmWasPlaying = film !== null && !film.paused
     this.pauseContent()
+    // A pod plays in a lent element only if every creative can: dash.js would
+    // attach a MediaSource of its own to it.
+    if (request.position === 'midroll' && slots.every((slot) => canPlayInLentElement(slot.mediaFile))) {
+      // The film's own `pause` reaches the host's player first; from the
+      // moment the element is lent, what it fires belongs to the ad.
+      if (filmWasPlaying && film && this.content?.borrowVideoForPiP) await nextEvent(film, 'pause', 300)
+      if (this.destroyed) return this.cancelled()
+      this.borrowContentVideo()
+    }
     this.adPlayer.show()
     let started = 0
     for (let index = 0; index < slots.length && !this.destroyed; index++) {
       let slot: Slot | null = slots[index]!
       while (slot && !this.destroyed) {
+        if (this.borrowedVideo && !canPlayInLentElement(slot.mediaFile)) {
+          await this.restoreBorrowedVideo()
+          if (this.destroyed) return this.cancelled()
+        }
         if (await this.playSlot(slot, slots.length)) {
           started++
           break
@@ -376,8 +408,8 @@ export class VastAdSession {
       }
     }
     if (this.destroyed) return this.cancelled()
-    this.endBreak(true)
-    return { outcome: this.lastOutcome, adsStarted: started }
+    await this.endBreak(true)
+    return this.destroyed ? this.cancelled() : { outcome: this.lastOutcome, adsStarted: started }
   }
 
   private resolve(tag: VastAdTag, signal: AbortSignal) {
@@ -490,10 +522,10 @@ export class VastAdSession {
    * state; a break asked for during the content leaves the state as the content
    * has it — only the listener hears, because nothing on screen changed.
    */
-  private failBreak(error: VastError, blocking: boolean, notify = true): VastBreakResult {
+  private async failBreak(error: VastError, blocking: boolean, notify = true): Promise<VastBreakResult> {
     this.lastOutcome = { type: 'failed', error }
     if (notify) this.emit('adFailed', error, null)
-    this.endBreak(blocking)
+    await this.endBreak(blocking)
     return { outcome: this.lastOutcome, adsStarted: 0 }
   }
 
@@ -505,14 +537,20 @@ export class VastAdSession {
    * The break is over. The content comes back only when no other break is
    * waiting — two breaks asked for together are one interruption to the viewer.
    */
-  private endBreak(changesState: boolean): void {
+  private async endBreak(changesState: boolean): Promise<void> {
     this.stopTicking()
     this.scheduler = null
     this.activeSlot = null
     this.pendingSlot = null
+    // The ad is over: the media controls stop describing it now, not once the film is back.
+    this.mediaSessionLock.release()
+    const restoring = this.restoreBorrowedVideo() ?? this.pictureInPicture.restore()
+    if (restoring) {
+      await restoring
+      if (this.destroyed) return
+    }
     this.adPlayer.unload()
     this.adPlayer.hide()
-    this.mediaSessionLock.release()
     if (this.queue.length === 0) this.resumeContent()
     this.resetPublishedAd()
     if (changesState) {
@@ -545,6 +583,62 @@ export class VastAdSession {
     } catch (error) {
       VastLog.warning(`content could not resume after the break: ${String(error)}`)
     }
+  }
+
+  private borrowContentVideo(): void {
+    if (this.borrowedVideo) return
+    const borrowed = this.content?.borrowVideoForPiP?.()
+    if (!borrowed) return
+    this.borrowedVideo = borrowed
+    this.adPlayer.useBorrowedVideo(borrowed.video, borrowed.hush ? () => borrowed.hush!() : undefined)
+  }
+
+  /**
+   * Whether an ad started now would be seen: on the page, or in the content's
+   * PiP window — played in the content's lent element, or taking the window
+   * over from its own.
+   */
+  private adCanBeSeen(): boolean {
+    if (this.environment.isPageVisible()) return true
+    const film = this.content?.videoElement
+    return this.pictureInPicture.canTakeOver(film) ||
+      (isInPictureInPicture(film) && typeof this.content?.borrowVideoForPiP === 'function')
+  }
+
+  /** Settles once {@link adCanBeSeen}, or once the session is destroyed. */
+  private adBecomesVisible(): Promise<void> {
+    return new Promise((resolve) => {
+      this.visibilityWaiter = () => {
+        if (!this.destroyed && !this.adCanBeSeen()) return
+        this.visibilityWaiter = null
+        resolve()
+      }
+    })
+  }
+
+  private restoreBorrowedVideo(): Promise<void> | null {
+    if (this.restoringBorrowedVideo) return this.restoringBorrowedVideo
+    const borrowed = this.borrowedVideo
+    if (!borrowed) return null
+    this.borrowedVideo = null
+    // The ad lets go of the element, which stays lent while the film is put
+    // back: its events are kept from the host's player until the film is
+    // where it was, so the player never sees it being loaded again.
+    this.adPlayer.unload()
+    this.restoringBorrowedVideo = Promise.resolve().then(async () => {
+      try {
+        await borrowed.restore()
+        VastLog.notice('PiP: the film is back in its element')
+      } catch (error) {
+        VastLog.warning(`could not restore the content source after PiP playback: ${String(error)}`)
+      } finally {
+        // One task more: a `pause` the ad's element queued is still the ad's.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0))
+        this.adPlayer.releaseBorrowedVideo()
+        this.restoringBorrowedVideo = null
+      }
+    })
+    return this.restoringBorrowedVideo
   }
 
   // MARK: - One creative
@@ -613,6 +707,7 @@ export class VastAdSession {
     if (this.activeSlot === slot) this.stopTicking()
     this.clearLoadTimer(slot)
     this.send(slot.engine.fail(error), slot)
+    this.mediaSessionLock.withdrawSkip()
     slot.finished = true
     const outcome: VastAdOutcome = { type: 'failed', error }
     slot.outcome = outcome
@@ -661,11 +756,12 @@ export class VastAdSession {
       videoElement: this.adPlayer.video,
       slotElement: this.adPlayer.layer,
     })
+    if (!this.borrowedVideo) this.pictureInPicture.enter(this.content?.videoElement)
     this.emit('adStarted', slot.ad, this.adPosition)
     if (this.configuration.mediaSession === 'describesAd') {
       this.mediaSessionLock.engage(slot.ad, { play: () => this.resume(), pause: () => this.pause() })
     }
-    if (!this.environment.isPageVisible()) this.hold('offScreen')
+    this.updateAdVisibility()
 
     const video = this.adPlayer.video
     // dash.js attaches a MediaSource URL to the element. Tracking macros still use the manifest URL.
@@ -762,6 +858,7 @@ export class VastAdSession {
     // and is held again only if the reason still stands.
     this.holds.clear()
     this.heldPlayback = false
+    this.mediaSessionLock.withdrawSkip()
     slot.finished = true
     const outcome = this.outcomeFor(slot)
     slot.outcome = outcome
@@ -821,6 +918,7 @@ export class VastAdSession {
       this.canSkip = true
       this.publish()
       this.verifySkipSurface(ad)
+      if (this.configuration.mediaSession === 'describesAd') this.mediaSessionLock.allowSkip(this.skipFromMediaControls)
       this.emit('skipAvailable', ad)
       return
     }
@@ -829,8 +927,10 @@ export class VastAdSession {
 
   // MARK: - Holds
 
-  private notePageVisible(visible: boolean): void {
-    if (visible) this.release('offScreen')
+  private readonly updateAdVisibility = (): void => {
+    this.visibilityWaiter?.()
+    const video = this.adPlayer.video
+    if (this.environment.isPageVisible() || isInPictureInPicture(video)) this.release('offScreen')
     else this.hold('offScreen')
   }
 
@@ -868,6 +968,19 @@ export class VastAdSession {
     slot.skipped = true
     this.send(slot.engine.userDidSkip(), slot)
     this.endSlot(slot)
+  }
+
+  /**
+   * `skipad` from the media controls — the "Skip Ad" button of Chrome's PiP
+   * window, where the page's own skip control cannot be seen. The button can
+   * outlive the ad it was offered for by a moment, so a refusal is not an error.
+   */
+  private readonly skipFromMediaControls = (): void => {
+    try {
+      this.skip()
+    } catch (error) {
+      if (!(error instanceof VastSkipError)) throw error
+    }
   }
 
   /**
@@ -979,7 +1092,11 @@ export class VastAdSession {
     this.destroyed = true
     this.stopTicking()
     this.resolution?.abort()
+    this.visibilityWaiter?.()
     this.stopObservingVisibility()
+    const doc = this.adPlayer.video.ownerDocument
+    doc.removeEventListener('enterpictureinpicture', this.updateAdVisibility, true)
+    doc.removeEventListener('leavepictureinpicture', this.updateAdVisibility, true)
     const active = this.activeSlot ?? this.pendingSlot
     if (active) {
       this.clearLoadTimer(active)
@@ -989,8 +1106,18 @@ export class VastAdSession {
     }
     for (const request of this.queue.splice(0)) request.resolve(this.cancelled())
     this.mediaSessionLock.release()
-    this.adPlayer.destroy()
-    this.resumeContent()
+    const restoringBorrowed = this.restoreBorrowedVideo()
+    const restoring = restoringBorrowed ?? this.pictureInPicture.restore()
+    if (restoring) {
+      this.adPlayer.pause()
+      void restoring.then(() => {
+        this.adPlayer.destroy()
+        if (restoringBorrowed) this.resumeContent()
+      })
+    } else {
+      this.adPlayer.destroy()
+    }
+    if (!restoringBorrowed) this.resumeContent()
     this.activeSlot = null
     this.pendingSlot = null
     this.scheduler = null
@@ -1323,6 +1450,28 @@ function shallowEqual(a: VastAdSnapshot, b: VastAdSnapshot): boolean {
 function isAdaptiveMedia(mimeType: string): boolean {
   const type = mimeType.toLowerCase()
   return type === DASH_MIME || HLS_MIMES.includes(type)
+}
+
+/**
+ * Whether a creative plays from its URL alone, as a lent element needs:
+ * anything but DASH. An HLS creative is chosen only where the browser plays
+ * HLS itself — the place a lent element is wanted most, Safari.
+ */
+function canPlayInLentElement(file: VastMediaFile): boolean {
+  return file.mimeType.toLowerCase() !== DASH_MIME
+}
+
+/** Settles on the next `type` event at `target`, heard after everyone already listening, or after `timeoutMs`. */
+function nextEvent(target: EventTarget, type: string, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer)
+      target.removeEventListener(type, done)
+      resolve()
+    }
+    const timer = setTimeout(done, timeoutMs)
+    target.addEventListener(type, done)
+  })
 }
 
 function defaultEnvironment(configuration: VastConfiguration): VastEnvironment {

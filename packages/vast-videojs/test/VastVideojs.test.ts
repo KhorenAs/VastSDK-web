@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { VastAdOverlay } from '@kinodaran/vast-kit'
+import { VastAdOverlay, setSourceQuietly } from '@kinodaran/vast-kit'
 import {
   createVastVideojs,
   registerVastPlugin,
@@ -123,6 +123,105 @@ afterEach(() => {
 // MARK: - The content player
 
 describe('videojsContent', () => {
+  it.each(['picture-in-picture', 'fullscreen'])('handles Safari native %s before a break', (mode) => {
+    const player = fakePlayer()
+    const exitFullscreen = vi.fn()
+    Object.assign(player.tech, {
+      webkitDisplayingFullscreen: true,
+      webkitPresentationMode: mode,
+      webkitExitFullscreen: exitFullscreen,
+    })
+
+    videojsContent(player).pauseForBreak()
+
+    expect(exitFullscreen).toHaveBeenCalledTimes(mode === 'fullscreen' ? 1 : 0)
+  })
+
+  describe('lending the film element to a mid-roll in PiP', () => {
+    const FILM = 'https://cdn.test/film/master.m3u8'
+
+    /** A film in Safari's native HLS, in a PiP window, with Video.js's own `src` wrapper on the element. */
+    function filmInPictureInPicture(options: { webkit?: boolean } = {}) {
+      const player = fakePlayer()
+      const video = player.tech
+      const media = new ScriptedMedia(video)
+      const sourcesets: string[] = []
+      const native = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src')!
+      Object.defineProperty(video, 'src', {
+        configurable: true,
+        get: () => native.get!.call(video),
+        set: (url: string) => {
+          native.set!.call(video, url)
+          sourcesets.push(url)
+        },
+      })
+      video.src = FILM
+      sourcesets.length = 0
+      if (options.webkit !== false) Object.assign(video, { webkitSetPresentationMode: vi.fn() })
+      Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, value: video })
+      return { player, video, media, sourcesets }
+    }
+
+    afterEach(() => { Reflect.deleteProperty(document, 'pictureInPictureElement') })
+
+    it('lends it in Safari by default, and nowhere else unless asked', () => {
+      const safari = filmInPictureInPicture()
+      expect(videojsContent(safari.player).borrowVideoForPiP?.()?.video).toBe(safari.video)
+      expect(videojsContent(safari.player, { sameElementPiP: false }).borrowVideoForPiP?.()).toBeNull()
+
+      const chrome = filmInPictureInPicture({ webkit: false })
+      expect(videojsContent(chrome.player).borrowVideoForPiP?.(), 'Chrome moves the window itself').toBeNull()
+      expect(videojsContent(chrome.player, { sameElementPiP: true }).borrowVideoForPiP?.()?.video).toBe(chrome.video)
+    })
+
+    it('lends only a film the element plays from a URL, and DRM only when asked', () => {
+      const { player } = filmInPictureInPicture()
+      const content = videojsContent(player)
+      expect(content.borrowVideoForPiP?.()).not.toBeNull()
+      expect(content.borrowVideoForPiP?.(), 'one break at a time').toBeNull()
+
+      const mse = filmInPictureInPicture()
+      Object.defineProperty(mse.video, 'currentSrc', { configurable: true, value: 'blob:https://www.example.com/1' })
+      expect(videojsContent(mse.player).borrowVideoForPiP?.(), 'a MediaSource cannot be given back').toBeNull()
+
+      const drm = filmInPictureInPicture()
+      Object.defineProperty(drm.video, 'mediaKeys', { configurable: true, value: {} })
+      expect(videojsContent(drm.player).borrowVideoForPiP?.()).toBeNull()
+      expect(videojsContent(drm.player, { sameElementPiPForProtectedContent: true }).borrowVideoForPiP?.()?.video).toBe(drm.video)
+
+      Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, value: null })
+      Reflect.deleteProperty(player.tech, 'webkitSetPresentationMode')
+      expect(videojsContent(player).borrowVideoForPiP?.(), 'nothing to lend for when the film is not in PiP').toBeNull()
+    })
+
+    it('puts the film back where it was without Video.js seeing a change of source', async () => {
+      const { player, video, media, sourcesets } = filmInPictureInPicture()
+      video.loop = true
+      video.muted = true
+      media.currentTime = 42
+      player.time = 42
+      const content = videojsContent(player)
+      content.pauseForBreak()
+      const borrowed = content.borrowVideoForPiP?.()
+      expect(borrowed?.video).toBe(video)
+      expect(video.loop).toBe(false)
+
+      // The ad, as the session's player sets it on a lent element.
+      setSourceQuietly(video, 'https://cdn.test/ad.mp4')
+      media.currentTime = 9
+      video.muted = false
+      media.readyState = 1
+      await borrowed!.restore()
+
+      expect(video.currentSrc).toBe(FILM)
+      expect(sourcesets, "Video.js's source never changed").toEqual([])
+      expect(video.currentTime).toBe(42)
+      expect(video.loop).toBe(true)
+      expect(video.muted).toBe(true)
+      expect(content.borrowVideoForPiP?.(), 'lendable again after the break').not.toBeNull()
+    })
+  })
+
   it('pauses the film, takes the controls away and marks the player for the break', () => {
     const player = fakePlayer()
     player.isPaused = false
