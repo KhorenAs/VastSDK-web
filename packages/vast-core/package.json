@@ -1,6 +1,6 @@
 {
   "name": "@kinodaran/vast-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "VAST 4.3 parsing, wrapper chains, macros and tracking, in pure TypeScript. No player, no network, no rendering.",
   "license": "MIT",
   "type": "module",

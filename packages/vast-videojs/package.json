@@ -1,6 +1,6 @@
 {
   "name": "@kinodaran/vast-videojs",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Video.js adapter for VastSDK: pauses the content, borrows the controls for the break, and resumes where the viewer was. Video.js 7 and 8.",
   "license": "MIT",
   "type": "module",
@@ -23,8 +23,8 @@
     "build": "tsup src/index.ts --format esm,cjs --sourcemap --clean --target es2017 && tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@kinodaran/vast-core": "0.1.0",
-    "@kinodaran/vast-kit": "0.1.0"
+    "@kinodaran/vast-core": "0.2.0",
+    "@kinodaran/vast-kit": "0.2.0"
   },
   "devDependencies": {
     "video.js": "^8.24.2"

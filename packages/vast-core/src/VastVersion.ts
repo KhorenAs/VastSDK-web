@@ -7,5 +7,5 @@
  * how an exchange tells one player from another when a creative misbehaves.
  */
 export const VastVersion = {
-  CURRENT: '0.1.0',
+  CURRENT: '0.2.0',
 } as const

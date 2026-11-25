@@ -1,6 +1,6 @@
 {
   "name": "@kinodaran/vast-kit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The VAST session for the browser: plays a break in its own <video> over the host player, reports tracking, and draws the ad UI.",
   "license": "MIT",
   "type": "module",
@@ -23,7 +23,7 @@
     "build": "tsup src/index.ts --format esm,cjs --sourcemap --clean --target es2017 && tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@kinodaran/vast-core": "0.1.0",
+    "@kinodaran/vast-core": "0.2.0",
     "dashjs": "^5.3.0"
   }
 }
